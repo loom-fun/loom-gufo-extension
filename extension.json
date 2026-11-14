@@ -1,0 +1,68 @@
+{
+  "schema": 1,
+  "name": "loom",
+  "version": "0.1.0",
+  "api_version": ">= 0.3.15",
+  "entry": "loom_register",
+  "registration_target": "gufo_loom",
+  "depends": [],
+  "platforms": [
+    "linux"
+  ],
+  "providers": [
+    {
+      "id": "loom-text",
+      "capability": "text_generation",
+      "keys": [
+        "manifest:loom"
+      ],
+      "model_ids": [],
+      "target": "gufo_loom",
+      "entry": "loom_text_provider_register"
+    }
+  ],
+  "options": [
+    {
+      "name": "--loom-serve",
+      "type": "path",
+      "commands": ["serve"],
+      "providers": ["loom-text"],
+      "help": "loom-serve executable (default: $LOOM_SERVE, else loom-serve on PATH)"
+    },
+    {
+      "name": "--loom-device",
+      "type": "string",
+      "commands": ["serve"],
+      "providers": ["loom-text"],
+      "help": "Loom device URI (default: amdgpu://?completion_spin_ns=4294967295)"
+    },
+    {
+      "name": "--loom-memory-bytes",
+      "type": "integer",
+      "commands": ["serve"],
+      "providers": ["loom-text"],
+      "help": "Device memory Loom may use for weights and state (default: 32 GiB)"
+    },
+    {
+      "name": "--loom-preset",
+      "type": "string",
+      "commands": ["serve"],
+      "providers": ["loom-text"],
+      "help": "Preset of the Loom package to serve (default: the package's own)"
+    }
+  ],
+  "packages": [
+    {
+      "pkg_config": "libcurl",
+      "nix": "curl"
+    }
+  ],
+  "targets": {
+    "gufo_loom": {
+      "requires": []
+    }
+  },
+  "licenses": [
+    "LICENSE"
+  ]
+}
