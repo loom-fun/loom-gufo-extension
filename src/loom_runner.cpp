@@ -723,6 +723,50 @@ public:
     loom.SetPosition(loom.position + 1);
   }
 
+  // Gufo's single-token batches: rows consuming their own pending selection
+  // advance together in one packed epoch; any other token advances alone.
+  void AdvanceBatch(
+      std::span<const ext::TextRunnerAdvance> advances) const override {
+    std::lock_guard lock(model_->mutex());
+    auto* embed = model_->embed();
+    std::vector<std::size_t> packed;
+    std::vector<std::uint32_t> rows;
+    for (std::size_t i = 0; i < advances.size(); ++i) {
+      try {
+        auto& loom = Require(advances[i].state.get());
+        const auto token = advances[i].token;
+        if (loom.deferred ||
+            static_cast<TextRunnerToken>(
+                loom_text_embed_row_token(embed, loom.row)) != token) {
+          AdvanceLocked(loom, token);
+          continue;
+        }
+        EnsureExtentLocked(loom, 2);
+        packed.push_back(i);
+        rows.push_back(loom.row);
+      } catch (...) {
+        if (advances[i].failure == nullptr)
+          throw;
+        *advances[i].failure = std::current_exception();
+      }
+    }
+    if (rows.empty())
+      return;
+    try {
+      model_->Check(
+          loom_text_embed_decode_batch(embed, rows.data(), rows.size()),
+          "decode");
+      for (const auto i : packed)
+        CommitLocked(Require(advances[i].state.get()), advances[i].token);
+    } catch (...) {
+      for (const auto i : packed) {
+        if (advances[i].failure == nullptr)
+          throw;
+        *advances[i].failure = std::current_exception();
+      }
+    }
+  }
+
   [[nodiscard]] ext::TextDecodeStep DecodeStep(
       ext::TextRunnerState& state, std::size_t max_tokens,
       sampling::SamplerState& sampler) const override {
