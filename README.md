@@ -11,6 +11,20 @@ loom-fetch huggingface:loom-fun/ggml-org-Qwen3-4B-loom --output=models/qwen3-4b
 gufo serve llm --model models/qwen3-4b --sessions 4
 ```
 
+## Build
+
+Gufo with this extension needs the model-directory support and the
+`loom-runtime` Nix package on the `loom-extension` branch of
+[loom-fun/gufo](https://github.com/loom-fun/gufo/tree/loom-extension):
+
+```sh
+nix build --impure --expr '((builtins.getFlake "github:loom-fun/gufo/loom-extension").packages.x86_64-linux.loom-runtime.override { embed = ./loom-embed; })'
+PKG_CONFIG_PATH=<that output>/lib/pkgconfig cmake <gufo> -DENGINE_ENABLE_HIP=ON \
+  -DGUFO_EXTENSIONS=loom -DGUFO_EXTENSION_DIRS=$PWD
+```
+
+Design and evidence: `DESIGN.md`; validation clients and results: `validation/`.
+
 ## How it fits
 
 - `loom-embed/` is the Loom side: `libloom_text_embed.so`, Loom's text model
