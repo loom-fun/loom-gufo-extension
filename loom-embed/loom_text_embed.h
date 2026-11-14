@@ -98,6 +98,12 @@ int loom_text_embed_row_prefill_request(loom_text_embed_t* embed, uint32_t row,
 int loom_text_embed_output_feed(loom_text_embed_request_t* request,
                                 const char* text, size_t text_size, int final,
                                 char* out, size_t capacity, size_t* out_size);
+// The raw framing the output reader consumed between the response's
+// reasoning and its first answer text (the model's own reasoning close), once
+// the response has reached its answer; empty before that or without
+// reasoning.
+int loom_text_embed_output_close(loom_text_embed_request_t* request, char* out,
+                                 size_t capacity, size_t* out_size);
 int loom_text_embed_output_tools(loom_text_embed_request_t* request,
                                  int truncated, char* json, size_t capacity,
                                  size_t* out_size);

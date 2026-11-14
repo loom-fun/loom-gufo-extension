@@ -67,6 +67,13 @@ struct loom_text_embed_request_t {
   iree_string_builder_t response;
   bool reasoning_open;
   bool finished;
+  // Response offsets: where the last reasoning span ended, and the framing
+  // between reasoning and the first answer text (the model's own close).
+  size_t reasoning_end;
+  size_t close_begin;
+  size_t close_end;
+  bool reasoned;
+  bool closed;
 };
 
 static const loom_serve_model_configuration_t* loom_text_embed_config(
@@ -765,6 +772,17 @@ LOOM_TEXT_EMBED_EXPORT int loom_text_embed_output_feed(
     if (!iree_status_is_ok(status) || !output.advanced) break;
     if (output.kind == LOOM_SERVE_TEXT_CHAT_OUTPUT_HIDDEN) continue;
     const bool reasoning = output.kind == LOOM_SERVE_TEXT_CHAT_OUTPUT_REASONING;
+    if (output.text.size) {
+      const size_t begin = (size_t)(output.text.data - response.data);
+      if (reasoning) {
+        request->reasoned = true;
+        request->reasoning_end = begin + output.text.size;
+      } else if (request->reasoned && !request->closed) {
+        request->closed = true;
+        request->close_begin = request->reasoning_end;
+        request->close_end = begin;
+      }
+    }
     if (reasoning != request->reasoning_open && output.text.size) {
       status = loom_text_embed_append(
           out, capacity, out_size,
@@ -783,6 +801,21 @@ LOOM_TEXT_EMBED_EXPORT int loom_text_embed_output_feed(
     }
   }
   EMBED_RETURN(embed, status);
+}
+
+LOOM_TEXT_EMBED_EXPORT int loom_text_embed_output_close(
+    loom_text_embed_request_t* request, char* out, size_t capacity,
+    size_t* out_size) {
+  *out_size = 0;
+  if (!request->closed) return 0;
+  const iree_string_view_t response =
+      iree_string_builder_view(&request->response);
+  EMBED_RETURN(request->embed,
+               loom_text_embed_append(
+                   out, capacity, out_size,
+                   iree_make_string_view(
+                       response.data + request->close_begin,
+                       request->close_end - request->close_begin)));
 }
 
 LOOM_TEXT_EMBED_EXPORT int loom_text_embed_output_tools(

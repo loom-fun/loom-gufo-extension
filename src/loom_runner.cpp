@@ -666,6 +666,8 @@ public:
             1, std::min<std::uint32_t>(model_->info().max_epoch_spans,
                                        rows_))) {
     close_tokens_ = DiscoverReasoningClose();
+    if (close_tokens_.empty())
+      ProbeReasoningClose();
   }
 
   [[nodiscard]] ext::TextRunnerDescriptor Descriptor() const override {
@@ -1334,6 +1336,8 @@ private:
     loom.piece_key = key;
     loom.piece = OutputLocked(loom, raw, false);
     loom.produced = true;
+    if (close_tokens_.empty() && loom.context != nullptr)
+      LearnCloseLocked(loom.context->request);
     // Track reasoning from the canonical markers the output reader emits.
     const auto open = loom.piece.rfind("<think>");
     const auto close = loom.piece.rfind("</think>");
@@ -1488,6 +1492,86 @@ private:
     return {};
   }
 
+  // Takes the model's own reasoning close from a response that reached its
+  // answer: the framing the package's output reader consumed in between.
+  void LearnCloseLocked(loom_text_embed_request_t* request) const {
+    if (request == nullptr)
+      return;
+    std::string close(kTextBuffer, '\0');
+    std::size_t size = 0;
+    if (loom_text_embed_output_close(request, close.data(), close.size(),
+                                     &size) != 0 ||
+        size == 0)
+      return;
+    close.resize(size);
+    std::vector<std::int32_t> tokens(close.size() + 16);
+    std::size_t count = 0;
+    if (loom_text_embed_tokenize(model_->embed(), close.data(), close.size(),
+                                 1, tokens.data(), tokens.size(),
+                                 &count) != 0 ||
+        count == 0)
+      return;
+    tokens.resize(count);
+    close_tokens_ = std::move(tokens);
+  }
+
+  // Packages whose templates show neither a reasoning close nor a way to turn
+  // reasoning off (they always reason): learn the close from one short greedy
+  // generation at load.
+  void ProbeReasoningClose() {
+    ext::ChatRequest request;
+    request.messages.emplace_back(ext::ChatRole::kUser,
+                                  "What is 2+2? Answer briefly.");
+    request.reasoning.enabled = true;
+    std::string body;
+    try {
+      body = ChatBody(model_->info().model_id, request);
+    } catch (const std::exception&) {
+      return;
+    }
+    std::lock_guard lock(model_->mutex());
+    auto* embed = model_->embed();
+    std::vector<std::int32_t> tokens(model_->info().context_capacity);
+    std::size_t count = 0;
+    loom_text_embed_request_t* handle = nullptr;
+    if (loom_text_embed_chat_prepare(embed, body.data(), body.size(),
+                                     tokens.data(), tokens.size(), &count,
+                                     &handle) != 0)
+      return;
+    loom_text_embed_decoder_t* decoder = nullptr;
+    constexpr std::size_t kProbeTokens = 768;
+    const std::uint64_t extent = std::min<std::uint64_t>(
+        model_->info().context_capacity, count + kProbeTokens + 1);
+    if (loom_text_embed_decoder_open(embed, &decoder) == 0 &&
+        count + kProbeTokens < model_->info().context_capacity &&
+        loom_text_embed_row_begin(embed, 0, handle, extent, 1) == 0) {
+      if (loom_text_embed_row_prefill(embed, 0, tokens.data(), count) == 0) {
+        std::string raw(256, '\0'), text(256 + kTextBuffer, '\0');
+        for (std::size_t i = 0; i < kProbeTokens && close_tokens_.empty();
+             ++i) {
+          if (loom_text_embed_row_is_eos(embed, 0))
+            break;
+          const std::int32_t token = loom_text_embed_row_token(embed, 0);
+          std::size_t size = 0, out = 0;
+          if (loom_text_embed_decoder_feed(decoder, &token, 1, raw.data(),
+                                           raw.size(), &size) != 0 ||
+              loom_text_embed_output_feed(handle, raw.data(), size, 0,
+                                          text.data(), text.size(),
+                                          &out) != 0)
+            break;
+          LearnCloseLocked(handle);
+          if (!close_tokens_.empty() ||
+              loom_text_embed_row_decode(embed, 0) != 0)
+            break;
+        }
+      }
+      loom_text_embed_row_end(embed, 0);
+      loom_text_embed_row_reset(embed, 0);
+    }
+    loom_text_embed_decoder_free(decoder);
+    loom_text_embed_request_free(handle);
+  }
+
   // Forces the reasoning close once the request's budget is spent.
   bool CloseReasoningLocked(LoomState& loom, ext::TextDecodeStep& step,
                             std::size_t remaining) const {
@@ -1513,7 +1597,8 @@ private:
   std::uint32_t max_context_;
   std::uint32_t rows_;
   std::uint32_t width_;
-  std::vector<std::int32_t> close_tokens_;
+  // Guarded by the model mutex; learned from output when templates hide it.
+  mutable std::vector<std::int32_t> close_tokens_;
 };
 
 std::shared_ptr<ext::TextModelRunner> CreateLoomRunner(
