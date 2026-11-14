@@ -18,6 +18,7 @@
 #include "loom/serve/service/text/chat.h"
 #include "loom/serve/service/text/model.h"
 #include "loom/serve/service/text/schedule.h"
+#include "loom/serve/service/text/tool_calls.h"
 #include "loomc/target/amdgpu/iree_hal.h"
 #include "loomc/target/configured.h"
 
@@ -47,7 +48,12 @@ struct loom_text_embed_t {
 struct loom_text_embed_request_t {
   loom_text_embed_t* embed;
   char* body;
+  uint64_t serial;
   loom_serve_text_chat_t chat;
+  // Generated text so far, and whether a reasoning span is open on output.
+  iree_string_builder_t response;
+  bool reasoning_open;
+  bool finished;
 };
 
 static const loom_serve_model_configuration_t* loom_text_embed_config(
@@ -173,6 +179,7 @@ static iree_status_t loom_text_embed_open_model(
       .weights_path = text->weights,
       .tokenizer_path = text->tokenizer,
       .row_count = embed->rows,
+      .checkpoint_capacity = options->checkpoints ? options->checkpoints : 64,
       .options = configuration->options,
   };
   IREE_RETURN_IF_ERROR(loom_serve_text_model_allocate(
@@ -265,6 +272,8 @@ LOOM_TEXT_EMBED_EXPORT int loom_text_embed_chat_prepare(
   if (!iree_status_is_ok(status)) EMBED_RETURN(embed, status);
   memset(request, 0, sizeof(*request));
   request->embed = embed;
+  request->serial = embed->request_serial + 1;
+  iree_string_builder_initialize(embed->allocator, &request->response);
   request->body = (char*)(request + 1);
   memcpy(request->body, body, body_size);
   request->body[body_size] = 0;
@@ -299,6 +308,7 @@ LOOM_TEXT_EMBED_EXPORT int loom_text_embed_chat_prepare(
     if (iree_status_is_ok(status)) {
       loom_serve_text_chat_deinitialize(&request->chat);
     }
+    iree_string_builder_deinitialize(&request->response);
     iree_allocator_free(embed->allocator, request);
     EMBED_RETURN(embed, status);
   }
@@ -309,6 +319,7 @@ LOOM_TEXT_EMBED_EXPORT int loom_text_embed_chat_prepare(
 LOOM_TEXT_EMBED_EXPORT void loom_text_embed_request_free(
     loom_text_embed_request_t* request) {
   if (!request) return;
+  iree_string_builder_deinitialize(&request->response);
   loom_serve_text_chat_deinitialize(&request->chat);
   iree_allocator_free(request->embed->allocator, request);
 }
@@ -625,4 +636,119 @@ LOOM_TEXT_EMBED_EXPORT void loom_text_embed_decoder_free(
   if (!decoder) return;
   if (decoder->state) iree_tokenizer_decode_state_deinitialize(decoder->state);
   iree_allocator_free(decoder->embed->allocator, decoder);
+}
+
+// Appends to out, failing on overflow.
+static iree_status_t loom_text_embed_append(char* out, size_t capacity,
+                                            size_t* size,
+                                            iree_string_view_t text) {
+  if (*size + text.size > capacity) {
+    return iree_make_status(IREE_STATUS_RESOURCE_EXHAUSTED,
+                            "normalized output buffer full");
+  }
+  memcpy(out + *size, text.data, text.size);
+  *size += text.size;
+  return iree_ok_status();
+}
+
+LOOM_TEXT_EMBED_EXPORT int loom_text_embed_output_feed(
+    loom_text_embed_request_t* request, const char* text, size_t text_size,
+    int final, char* out, size_t capacity, size_t* out_size) {
+  loom_text_embed_t* embed = request->embed;
+  *out_size = 0;
+  if (request->finished) return 0;
+  iree_status_t status = iree_string_builder_append_string(
+      &request->response, iree_make_string_view(text, text_size));
+  const iree_string_view_t response =
+      iree_string_builder_view(&request->response);
+  const loom_serve_text_chat_output_phase_t phase =
+      final ? LOOM_SERVE_TEXT_CHAT_OUTPUT_COMPLETE
+            : LOOM_SERVE_TEXT_CHAT_OUTPUT_STREAMING;
+  while (iree_status_is_ok(status)) {
+    loom_serve_text_chat_output_t output = {0};
+    status = loom_serve_text_chat_output_next(&request->chat, response, phase,
+                                              embed->allocator, &output);
+    if (!iree_status_is_ok(status) || !output.advanced) break;
+    if (output.kind == LOOM_SERVE_TEXT_CHAT_OUTPUT_HIDDEN) continue;
+    const bool reasoning = output.kind == LOOM_SERVE_TEXT_CHAT_OUTPUT_REASONING;
+    if (reasoning != request->reasoning_open && output.text.size) {
+      status = loom_text_embed_append(
+          out, capacity, out_size,
+          reasoning ? IREE_SV("<think>") : IREE_SV("</think>"));
+      request->reasoning_open = reasoning;
+    }
+    if (iree_status_is_ok(status)) {
+      status = loom_text_embed_append(out, capacity, out_size, output.text);
+    }
+  }
+  if (iree_status_is_ok(status) && final) {
+    if (request->reasoning_open) {
+      status = loom_text_embed_append(out, capacity, out_size,
+                                      IREE_SV("</think>"));
+      request->reasoning_open = false;
+    }
+  }
+  EMBED_RETURN(embed, status);
+}
+
+LOOM_TEXT_EMBED_EXPORT int loom_text_embed_output_tools(
+    loom_text_embed_request_t* request, int truncated, char* json,
+    size_t capacity, size_t* out_size) {
+  loom_text_embed_t* embed = request->embed;
+  *out_size = 0;
+  request->finished = true;
+  loom_serve_text_tool_calls_t calls;
+  loom_serve_text_tool_calls_initialize(embed->allocator, &calls);
+  loom_serve_text_chat_scratch_t scratch;
+  loom_serve_text_chat_scratch_initialize(embed->allocator, &scratch);
+  loom_serve_text_chat_completion_t completion = {0};
+  iree_status_t status = loom_serve_text_chat_complete(
+      &request->chat, iree_string_builder_view(&request->response),
+      truncated != 0, request->serial, &calls, &scratch, embed->allocator,
+      &completion);
+  iree_string_builder_t builder;
+  iree_string_builder_initialize(embed->allocator, &builder);
+  if (iree_status_is_ok(status) && calls.count) {
+    status = loom_serve_text_tool_calls_write_json(&calls, false, &builder);
+  }
+  if (iree_status_is_ok(status)) {
+    status = loom_text_embed_append(json, capacity, out_size,
+                                    iree_string_builder_view(&builder));
+  }
+  iree_string_builder_deinitialize(&builder);
+  loom_serve_text_chat_completion_deinitialize(&completion);
+  loom_serve_text_chat_scratch_deinitialize(&scratch);
+  loom_serve_text_tool_calls_deinitialize(&calls);
+  EMBED_RETURN(embed, status);
+}
+
+LOOM_TEXT_EMBED_EXPORT int loom_text_embed_row_pin(
+    loom_text_embed_t* embed, uint32_t row,
+    loom_text_embed_checkpoint_t** out_checkpoint) {
+  loom_serve_text_checkpoint_t* checkpoint = NULL;
+  iree_status_t status =
+      loom_serve_text_row_try_pin(loom_text_embed_row(embed, row), &checkpoint);
+  *out_checkpoint = (loom_text_embed_checkpoint_t*)checkpoint;
+  if (iree_status_is_ok(status) && !checkpoint) return 1;
+  EMBED_RETURN(embed, status);
+}
+
+LOOM_TEXT_EMBED_EXPORT int loom_text_embed_row_restore(
+    loom_text_embed_t* embed, uint32_t row,
+    const loom_text_embed_checkpoint_t* checkpoint, int* restored) {
+  bool done = false;
+  loom_serve_text_row_t* handle = loom_text_embed_row(embed, row);
+  loom_serve_text_row_release_reservation(handle);
+  embed->extents[row] = 0;
+  iree_status_t status = loom_serve_text_row_try_restore(
+      handle, (const loom_serve_text_checkpoint_t*)checkpoint, &done);
+  *restored = done;
+  EMBED_RETURN(embed, status);
+}
+
+LOOM_TEXT_EMBED_EXPORT void loom_text_embed_checkpoint_release(
+    loom_text_embed_t* embed, loom_text_embed_checkpoint_t* checkpoint) {
+  (void)embed;
+  loom_serve_text_checkpoint_release(
+      (loom_serve_text_checkpoint_t*)checkpoint);
 }

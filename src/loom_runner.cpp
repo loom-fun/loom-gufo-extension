@@ -1,21 +1,30 @@
 // Loom model packages as Gufo text models.
 //
 // A fetched Loom package (model.json, its compiled programs and parameters)
-// runs through Gufo's ordinary step contract, TextModelRunner: Gufo's server,
-// scheduler and sampler policy stay in charge, and Loom supplies the model's
-// kernels, chat program and tokenizer through libloom_text_embed. Each Gufo
-// session slot is one resident Loom row. Gufo decides which sessions step
-// together; one decode batch is one packed Loom epoch, and a package with a
-// drafter decodes several tokens per step with Loom's on-device verification.
+// runs through Gufo's ordinary step contract, TextModelRunner. Gufo's server,
+// scheduler, component cache, sampler policy and parsers stay in charge; Loom
+// supplies the model's kernels, chat program, tokenizer, output parser and
+// drafter through libloom_text_embed:
 //
-// Prototype limits: no prefix reuse across requests (the cache adapter
-// declares no continuation), sampling runs on device with the package's
-// sampler (temperature, top-k, top-p, seed), so Gufo's grammar constraints
-// and logprobs are not applied.
+// - Each Gufo session slot is one resident Loom row. Gufo decides which
+//   sessions step together; one decode batch is one packed Loom epoch, and a
+//   package with a drafter decodes several verified tokens per step.
+// - Gufo's component cache keeps Loom row checkpoints: a capture pins the
+//   row's exact state on device (pages shared copy-on-write), a restore puts
+//   it into any row, and evicting the cache entry releases it.
+// - Output is read with the package's own chat program, as loom-serve reads
+//   it, and streamed to Gufo in one canonical markup: reasoning inside
+//   <think>...</think>, answers as text, tool calls as <tool_call> JSON
+//   blocks. Gufo's parsers then serve every endpoint for every architecture.
+//
+// Sampling runs on device with the package's sampler (temperature, top-k,
+// top-p, seed); Gufo's grammar constraints, logprobs, min-p and penalties
+// need logits, which Loom packages do not expose.
 
 #include <loom_text_embed.h>
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <chrono>
 #include <cstdint>
@@ -30,6 +39,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <vector>
 
 #include <gufo/ext/generated/loom_constants.hpp>
@@ -42,6 +52,14 @@ namespace {
 
 namespace fs = std::filesystem;
 using ext::TextRunnerToken;
+
+constexpr std::uint64_t kExtentSlack = 1024;
+// Retained row checkpoints, and host blocks naming them in Gufo's cache.
+constexpr std::size_t kCheckpoints = 64;
+constexpr std::size_t kMarkerBytes = 16;
+// Marker blocks plus the cache's per-slot metadata.
+constexpr std::size_t kHostCacheBytes = std::size_t{8} << 20;
+constexpr std::size_t kTextBuffer = 1 << 16;
 
 // ---------------------------------------------------------------- probe ---
 
@@ -83,7 +101,8 @@ bool ProbeLoomText(std::string_view model_root) {
 
 // ---------------------------------------------------------------- model ---
 
-// One opened package; every Loom call is serialized on its mutex.
+// One opened package; every Loom call is serialized on its mutex (recursive:
+// releasing a cache entry can release a checkpoint inside a runner call).
 class LoomModel {
 public:
   LoomModel(const std::string& path, const ext::ParsedOptions& options,
@@ -105,19 +124,24 @@ public:
         .device_uri = device.empty() ? nullptr : device.c_str(),
         .memory_bytes = memory,
         .rows = static_cast<std::uint32_t>(std::max<std::size_t>(sessions, 1)),
+        .checkpoints = kCheckpoints,
     };
     char error[2048] = {};
     if (loom_text_embed_open(&embed_options, &embed_, error, sizeof(error)))
       throw std::runtime_error(std::string("loom: ") + error);
     loom_text_embed_info(embed_, &info_);
   }
-  ~LoomModel() { loom_text_embed_close(embed_); }
+  ~LoomModel() {
+    for (auto& [id, checkpoint] : checkpoints_)
+      loom_text_embed_checkpoint_release(embed_, checkpoint);
+    loom_text_embed_close(embed_);
+  }
   LoomModel(const LoomModel&) = delete;
   LoomModel& operator=(const LoomModel&) = delete;
 
   [[nodiscard]] const loom_text_embed_info_t& info() const { return info_; }
   [[nodiscard]] loom_text_embed_t* embed() const { return embed_; }
-  std::mutex& mutex() const { return mutex_; }
+  std::recursive_mutex& mutex() const { return mutex_; }
 
   // Throws on a nonzero status other than `allowed`.
   int Check(int status, const char* what, int allowed = 0) const {
@@ -127,17 +151,50 @@ public:
     return status;
   }
 
+  // Checkpoint handles named by cache payloads.
+  std::uint64_t Keep(loom_text_embed_checkpoint_t* checkpoint) {
+    const auto id = next_checkpoint_++;
+    checkpoints_.emplace(id, checkpoint);
+    return id;
+  }
+  loom_text_embed_checkpoint_t* Find(std::uint64_t id) const {
+    const auto found = checkpoints_.find(id);
+    return found == checkpoints_.end() ? nullptr : found->second;
+  }
+  void Release(std::uint64_t id) {
+    std::lock_guard lock(mutex_);
+    const auto found = checkpoints_.find(id);
+    if (found == checkpoints_.end())
+      return;
+    loom_text_embed_checkpoint_release(embed_, found->second);
+    checkpoints_.erase(found);
+  }
+
 private:
   loom_text_embed_t* embed_{nullptr};
   loom_text_embed_info_t info_{};
-  mutable std::mutex mutex_;
+  mutable std::recursive_mutex mutex_;
+  std::unordered_map<std::uint64_t, loom_text_embed_checkpoint_t*>
+      checkpoints_;
+  std::uint64_t next_checkpoint_{1};
+};
+
+// One request's output reader (the package's chat program and parser).
+class LoomPromptContext final : public ext::TextPromptContext {
+public:
+  LoomPromptContext(std::shared_ptr<LoomModel> model,
+                    loom_text_embed_request_t* request)
+      : model(std::move(model)), request(request) {}
+  ~LoomPromptContext() override {
+    std::lock_guard lock(model->mutex());
+    loom_text_embed_request_free(request);
+  }
+  std::shared_ptr<LoomModel> model;
+  loom_text_embed_request_t* request;
 };
 
 // ---------------------------------------------------------------- cache ---
 
-// Gufo's component cache sees each Loom row as one slot without components:
-// Loom keeps the row state on device, and this prototype offers no prefix
-// continuation, so every request prefills from position zero.
 // Free Loom rows, shared by the adapter and its slots.
 struct RowPool {
   std::mutex mutex;
@@ -154,22 +211,25 @@ public:
   }
   [[nodiscard]] bool IsValid() const noexcept override { return true; }
   [[nodiscard]] std::uint32_t row() const { return row_; }
-  // Tokens the row has consumed, as Gufo counts them.
+  // Tokens Gufo counts as consumed, and the prompt token still deferred
+  // (consumed by Gufo's count, not yet by the Loom row).
   std::size_t position{0};
-  // A restore was attempted; Loom rows cannot be rebuilt from host bytes.
-  bool restore_failed{false};
+  std::int64_t deferred{-1};
+  // A restore in progress loaded its checkpoint.
+  bool restore_ok{false};
+  // The Loom row must be reset before reuse.
+  bool stale{true};
 
 private:
   std::uint32_t row_;
   std::shared_ptr<RowPool> pool_;
 };
 
-// The one component Gufo's cache requires: a marker naming the row and its
-// position. It is captured like private state but never restores a row.
-constexpr cache::ComponentId kMarker{1};
-constexpr std::size_t kMarkerBytes = 16;
-const cache::ComponentDescriptor kMarkerDescriptor{
-    .id = kMarker,
+// The one component: the row endpoint, held on device by a Loom checkpoint
+// and named in Gufo's cache by {checkpoint id, deferred token}.
+constexpr cache::ComponentId kEndpoint{1};
+const cache::ComponentDescriptor kEndpointDescriptor{
+    .id = kEndpoint,
     .layout_version = 1,
     .kind = cache::ComponentKind::kPrivateState,
     .state_bytes = kMarkerBytes,
@@ -192,22 +252,41 @@ cache::Completion Done(bool ok) {
       ok ? cache::TransferResult::kSucceeded : cache::TransferResult::kFailed));
 }
 
+struct Endpoint {
+  std::uint64_t checkpoint;
+  std::int64_t deferred;
+};
+
+// Owns the bytes of one cache payload; the checkpoint they name lives as
+// long as Gufo keeps the payload.
+struct EndpointPayload {
+  std::shared_ptr<LoomModel> model;
+  std::array<std::byte, kMarkerBytes> bytes{};
+  ~EndpointPayload() {
+    Endpoint endpoint{};
+    std::memcpy(&endpoint, bytes.data(), sizeof(endpoint));
+    if (endpoint.checkpoint != 0)
+      model->Release(endpoint.checkpoint);
+  }
+};
+
 class LoomAdapter final : public cache::Adapter {
 public:
-  LoomAdapter(std::shared_ptr<const LoomModel> model, std::uint32_t rows)
+  LoomAdapter(std::shared_ptr<LoomModel> model, std::uint32_t rows)
       : model_(std::move(model)), pool_(std::make_shared<RowPool>()) {
     pool_->used.assign(rows, false);
   }
   [[nodiscard]] cache::Capabilities GetCapabilities() const override {
-    return {.continuation = false};
+    // Checkpoints live on device, so entries are never written to disk.
+    return {.continuation = true, .persistent_encoding = false};
   }
   [[nodiscard]] std::span<const cache::ComponentDescriptor> Components()
       const override {
-    return std::span(&kMarkerDescriptor, 1);
+    return std::span(&kEndpointDescriptor, 1);
   }
   [[nodiscard]] cache::Identity CompatibilityIdentity() const override {
     const std::string id =
-        std::string("loom-text-1:") + model_->info().model_id;
+        std::string("loom-text-2:") + model_->info().model_id;
     return cache::Identity(id.begin(), id.end());
   }
   [[nodiscard]] std::unique_ptr<cache::Slot> CreateSlot(
@@ -223,64 +302,94 @@ public:
   }
   [[nodiscard]] std::vector<cache::ComponentPosition> Positions(
       const cache::Slot& slot) const override {
-    return {{.id = kMarker,
+    return {{.id = kEndpoint,
              .valid_rows = dynamic_cast<const LoomSlot&>(slot).position}};
   }
   [[nodiscard]] std::vector<cache::Rows> PlanPrefill(
       const cache::Slot&, cache::Rows first, cache::Rows end) const override {
     std::vector<cache::Rows> boundaries;
-    const cache::Rows step = std::max<cache::Rows>(
-        model_->info().prefill_capacity, 1);
+    if (first >= end)
+      return boundaries;
+    const cache::Rows step =
+        std::max<cache::Rows>(model_->info().prefill_capacity, 1);
     for (cache::Rows at = first + step; at < end; at += step)
       boundaries.push_back(at);
     boundaries.push_back(end);
     return boundaries;
   }
-  void BeginRestore(cache::Slot& slot,
-                    std::span<const cache::ComponentPosition>) override {
-    dynamic_cast<LoomSlot&>(slot).restore_failed = true;
+  void BeginRestore(
+      cache::Slot& slot,
+      std::span<const cache::ComponentPosition> positions) override {
+    auto& loom = dynamic_cast<LoomSlot&>(slot);
+    loom.restore_ok = false;
+    loom.position = positions.empty() ? 0 : positions.front().valid_rows;
   }
   [[nodiscard]] cache::Completion CapturePrivate(const cache::Slot& slot,
                                                  cache::ComponentId,
                                                  std::span<std::byte> bytes,
                                                  cache::Stream&) override {
     const auto& loom = dynamic_cast<const LoomSlot&>(slot);
-    const std::uint64_t marker[2] = {loom.row(), loom.position};
-    std::memcpy(bytes.data(), marker,
-                std::min(bytes.size(), sizeof(marker)));
+    std::lock_guard lock(model_->mutex());
+    // Loom pins only a nonempty row.
+    if (loom_text_embed_row_position(model_->embed(), loom.row()) == 0)
+      return Done(false);
+    loom_text_embed_checkpoint_t* checkpoint = nullptr;
+    if (model_->Check(loom_text_embed_row_pin(model_->embed(), loom.row(),
+                                              &checkpoint),
+                      "pin", 1) != 0)
+      return Done(false);
+    const Endpoint endpoint{model_->Keep(checkpoint), loom.deferred};
+    std::memcpy(bytes.data(), &endpoint,
+                std::min(bytes.size(), sizeof(endpoint)));
     return Done(true);
   }
   [[nodiscard]] cache::Completion CopyRowsOut(const cache::Slot&,
                                               cache::ComponentId, cache::Rows,
                                               cache::Rows, std::span<std::byte>,
                                               cache::Stream&) override {
-    throw std::logic_error("loom rows have no cached components");
+    throw std::logic_error("loom endpoints have no rows");
   }
   [[nodiscard]] cache::Completion CopyRowsIn(cache::Slot&, cache::ComponentId,
                                              cache::Rows, cache::Rows,
                                              std::span<const std::byte>,
                                              cache::Stream&) override {
-    throw std::logic_error("loom rows have no cached components");
+    throw std::logic_error("loom endpoints have no rows");
   }
-  [[nodiscard]] cache::Completion LoadPrivate(cache::Slot&, cache::ComponentId,
-                                              std::span<const std::byte>,
+  [[nodiscard]] cache::Completion LoadPrivate(cache::Slot& slot,
+                                              cache::ComponentId,
+                                              std::span<const std::byte> bytes,
                                               cache::Stream&) override {
-    return Done(false);
+    auto& loom = dynamic_cast<LoomSlot&>(slot);
+    Endpoint endpoint{};
+    std::memcpy(&endpoint, bytes.data(),
+                std::min(bytes.size(), sizeof(endpoint)));
+    std::lock_guard lock(model_->mutex());
+    const auto* checkpoint = model_->Find(endpoint.checkpoint);
+    int restored = 0;
+    if (checkpoint != nullptr)
+      model_->Check(loom_text_embed_row_restore(model_->embed(), loom.row(),
+                                                checkpoint, &restored),
+                    "restore");
+    loom.restore_ok = restored != 0;
+    loom.deferred = endpoint.deferred;
+    loom.stale = !loom.restore_ok;
+    return Done(loom.restore_ok);
   }
-  // Loom state lives on device; a restore from host bytes always misses.
   [[nodiscard]] bool Validate(
       cache::Slot& slot, std::span<const cache::ComponentPosition>) override {
-    return !dynamic_cast<LoomSlot&>(slot).restore_failed;
+    return dynamic_cast<LoomSlot&>(slot).restore_ok;
   }
   [[nodiscard]] bool Invalidate(cache::Slot& slot) noexcept override {
     auto& loom = dynamic_cast<LoomSlot&>(slot);
-    loom.restore_failed = false;
     loom.position = 0;
+    loom.deferred = -1;
+    loom.restore_ok = false;
+    loom.stale = true;
     return true;
   }
 
 private:
-  std::shared_ptr<const LoomModel> model_;
+  std::shared_ptr<LoomModel> model_;
   std::shared_ptr<RowPool> pool_;
 };
 
@@ -296,37 +405,28 @@ public:
 class LoomState final : public ext::TextRunnerState {
 public:
   LoomState(LoomSlot& slot, loom_text_embed_decoder_t* decoder)
-      : row(slot.row()), slot(&slot), decoder(decoder) {}
+      : slot(&slot), decoder(decoder) {}
   ~LoomState() override { loom_text_embed_decoder_free(decoder); }
-  // The row itself resets when the next prompt starts at position zero.
   void Invalidate() noexcept override {
-    SetPosition(0);
-    deferred.reset();
-    bound.clear();
-    generated.clear();
+    slot->position = 0;
+    slot->deferred = -1;
+    slot->stale = true;
   }
-  std::uint32_t row;
+  [[nodiscard]] std::uint32_t row() const { return slot->row(); }
+  [[nodiscard]] std::size_t position() const { return slot->position; }
+
   LoomSlot* slot;
-  // Streaming detokenizer over the generated tokens; the piece of the
-  // pending selection is cached so a repeated query does not feed it twice.
+  // Per request: output reader, streaming detokenizer, the bound sampling,
+  // the selection whose piece was produced, and whether anything was.
+  std::shared_ptr<const LoomPromptContext> context;
   loom_text_embed_decoder_t* decoder;
+  std::string bound;
   std::optional<std::pair<std::size_t, std::int32_t>> piece_key;
   std::string piece;
-  // Tokens Gufo counts as consumed (prompt and advanced selections).
-  std::size_t position{0};
-  void SetPosition(std::size_t value) {
-    position = value;
-    slot->position = value;
-  }
-  // The prompt's last token, consumed when Gufo first asks for a selection,
-  // once the request's sampler is known.
-  std::optional<TextRunnerToken> deferred;
-  // Sampling the row is bound to.
-  std::string bound;
-  // Generated tokens, for streamed pieces.
-  std::vector<std::int32_t> generated;
-  // The request's grammar was released (the package samples on device).
+  std::size_t generated{0};
+  bool produced{false};
   bool unconstrained{false};
+  bool flushed{false};
 };
 
 LoomState& Require(ext::TextRunnerState& state) {
@@ -420,8 +520,20 @@ std::string ChatBody(const std::string& model,
       tools.push_back(std::move(definition));
     }
     body["tools"] = std::move(tools);
-    if (request.tool_choice == ext::ChatRequest::ToolChoice::kNone)
+    if (request.tool_choice == ext::ChatRequest::ToolChoice::kNone) {
       body["tool_choice"] = "none";
+    } else if (request.tool_choice == ext::ChatRequest::ToolChoice::kRequired) {
+      if (request.forced_tool_name.empty()) {
+        body["tool_choice"] = "required";
+      } else {
+        json::Value function = json::Value::object();
+        function["name"] = request.forced_tool_name;
+        json::Value choice = json::Value::object();
+        choice["type"] = "function";
+        choice["function"] = std::move(function);
+        body["tool_choice"] = std::move(choice);
+      }
+    }
   }
   if (request.reasoning.enabled.has_value()) {
     json::Value kwargs = json::Value::object();
@@ -451,34 +563,55 @@ std::string SamplingBody(const std::string& model,
   return body.dump();
 }
 
+// Tool calls as Gufo's JSON dialect reads them.
+std::string ToolMarkup(std::string_view calls_json) {
+  if (calls_json.empty())
+    return {};
+  std::string markup;
+  try {
+    const auto calls = json::parse(calls_json);
+    for (const auto& call : calls.items()) {
+      const auto* function = call.find("function");
+      if (function == nullptr)
+        continue;
+      json::Value block = json::Value::object();
+      block["name"] = function->member_str("name");
+      const auto arguments = function->member_str("arguments");
+      block["arguments"] = ParseOr(arguments, json::Value(arguments));
+      markup += "<tool_call>\n" + block.dump() + "\n</tool_call>";
+    }
+  } catch (const std::exception&) {
+  }
+  return markup;
+}
+
 // --------------------------------------------------------------- runner ---
 
 class LoomRunner final : public ext::TextModelRunner {
 public:
-  LoomRunner(std::shared_ptr<LoomModel> model, std::size_t sessions)
+  explicit LoomRunner(std::shared_ptr<LoomModel> model)
       : model_(std::move(model)),
         rows_(std::max<std::uint32_t>(model_->info().rows, 1)),
-        width_(std::min<std::uint32_t>(model_->info().max_epoch_spans,
-                                       rows_)) {
-    (void)sessions;
-  }
+        width_(std::max<std::uint32_t>(
+            1, std::min<std::uint32_t>(model_->info().max_epoch_spans,
+                                       rows_))) {}
 
   [[nodiscard]] ext::TextRunnerDescriptor Descriptor() const override {
-    const bool drafted = model_->info().draft_depth > 0;
     return {
         .model_id = model_->info().model_id,
-        .state_abi = "loom-text-1",
+        .state_abi = "loom-text-2",
         .max_context = model_->info().context_capacity,
         .capabilities =
             {
                 .incremental_prefill = true,
                 .final_token_advance_required = false,
                 .incremental_text_is_exact = true,
-                .multi_token_decode = drafted,
-                .batched_multi_token_decode = drafted && width_ > 1,
-                .batched_multi_token_decode_max_width =
-                    drafted ? width_ : 0,
-                .prefix_reuse = false,
+                // Every decode step goes through DecodeBatch, which sees the
+                // next selection before publishing (end of output).
+                .multi_token_decode = true,
+                .batched_multi_token_decode = width_ > 1,
+                .batched_multi_token_decode_max_width = width_,
+                .prefix_reuse = true,
             },
         .scheduling =
             {
@@ -491,8 +624,8 @@ public:
   }
 
   [[nodiscard]] ext::TextRunnerResourceClaim ResourceClaim() const override {
-    // Loom accounts device memory itself; the host cache holds only row
-    // markers (kMarkerBlocks blocks of kMarkerBlockBytes).
+    // Loom accounts device memory itself; the host cache holds only
+    // checkpoint names and its own metadata.
     return {.per_request_state_bytes = 0,
             .temporary_scratch_bytes = 0,
             .retained_snapshot_capacity_bytes = kHostCacheBytes,
@@ -515,8 +648,8 @@ public:
         loom_text_embed_vocabulary_size(model_->embed()));
   }
 
-  // Gufo binds a grammar to every tool request. The package samples on
-  // device, so the grammar is accepted but not enforced (as in loom-serve).
+  // Gufo binds a grammar to every tool request; the package samples on
+  // device, so the grammar is released (see Unconstrain).
   [[nodiscard]] std::shared_ptr<const sampling::ConstraintVocabulary>
   BuildConstraintVocabulary() const override {
     return std::make_shared<const sampling::ConstraintVocabulary>(
@@ -529,43 +662,109 @@ public:
   [[nodiscard]] std::vector<TextRunnerToken> Tokenize(
       std::string_view text) const override {
     std::lock_guard lock(model_->mutex());
-    return TokenizeLocked(text, true);
+    std::vector<std::int32_t> tokens(text.size() + 16);
+    std::size_t count = 0;
+    model_->Check(loom_text_embed_tokenize(model_->embed(), text.data(),
+                                           text.size(), 1, tokens.data(),
+                                           tokens.size(), &count),
+                  "tokenize");
+    return std::vector<TextRunnerToken>(tokens.begin(), tokens.begin() + count);
   }
 
   [[nodiscard]] std::optional<std::vector<TextRunnerToken>> RenderAndTokenize(
+      const ext::ChatRequest& request) const override {
+    auto prepared = PreparePrompt(request);
+    if (!prepared)
+      return std::nullopt;
+    return std::move(prepared->tokens);
+  }
+
+  // The package's chat program renders the prompt; the request's output
+  // reader travels with it to the state (SetPromptContext).
+  [[nodiscard]] std::optional<ext::TextPreparedPrompt> PreparePrompt(
       const ext::ChatRequest& request) const override {
     const std::string body = ChatBody(model_->info().model_id, request);
     std::lock_guard lock(model_->mutex());
     std::vector<std::int32_t> tokens(model_->info().context_capacity);
     std::size_t count = 0;
+    loom_text_embed_request_t* handle = nullptr;
     if (loom_text_embed_chat_prepare(model_->embed(), body.data(), body.size(),
                                      tokens.data(), tokens.size(), &count,
-                                     nullptr) != 0)
+                                     &handle) != 0)
       throw std::invalid_argument(
           std::string("loom: ") + loom_text_embed_error(model_->embed()));
-    return std::vector<TextRunnerToken>(tokens.begin(),
-                                        tokens.begin() + count);
+    auto context = std::make_shared<LoomPromptContext>(model_, handle);
+    // The next turn renders this conversation plus the answer and a new user
+    // message. Where that rendering departs from this prompt, the assistant
+    // framing begins: Gufo checkpoints before it so the next turn reuses all
+    // earlier work, whatever the package's template.
+    std::size_t stable = 0;
+    if (!request.messages.empty()) {
+      ext::ChatRequest next = request;
+      next.messages.emplace_back(ext::ChatRole::kAssistant, "\x01");
+      next.messages.emplace_back(ext::ChatRole::kUser, "\x01");
+      const std::string next_body = ChatBody(model_->info().model_id, next);
+      std::vector<std::int32_t> next_tokens(model_->info().context_capacity);
+      std::size_t next_count = 0;
+      if (loom_text_embed_chat_prepare(model_->embed(), next_body.data(),
+                                       next_body.size(), next_tokens.data(),
+                                       next_tokens.size(), &next_count,
+                                       nullptr) == 0) {
+        const std::size_t limit = std::min(count, next_count);
+        while (stable < limit && tokens[stable] == next_tokens[stable])
+          ++stable;
+      }
+    }
+    return ext::TextPreparedPrompt{
+        .tokens = std::vector<TextRunnerToken>(tokens.begin(),
+                                               tokens.begin() + count),
+        .context = std::move(context),
+        .cache_prefix_tokens = stable < count ? stable : 0,
+    };
   }
 
-  // Where the package's chat program leaves the prompt: inside reasoning
-  // (it ends in the reasoning opener), after closed reasoning, or neither.
+  void SetPromptContext(
+      ext::TextRunnerState& state,
+      std::shared_ptr<const ext::TextPromptContext> context) const override {
+    auto& loom = Require(state);
+    auto loom_context =
+        std::dynamic_pointer_cast<const LoomPromptContext>(context);
+    if (context != nullptr && loom_context == nullptr)
+      throw std::invalid_argument("prompt context is not from the Loom runner");
+    // Called again after a restore within the same request.
+    if (loom_context == loom.context && !loom.produced)
+      return;
+    std::lock_guard lock(model_->mutex());
+    loom.context = std::move(loom_context);
+    loom.bound.clear();
+    loom.piece_key.reset();
+    loom.generated = 0;
+    loom.produced = false;
+    loom.unconstrained = false;
+    loom.flushed = false;
+    model_->Check(loom_text_embed_decoder_reset(loom.decoder), "decoder");
+  }
+
+  // The package's chat program may open reasoning in the prompt; Gufo's
+  // reasoning budget then counts from the prompt's opener.
   [[nodiscard]] ext::InitialOutputState InitialOutputState(
       const ext::ChatRequest& request) const override {
-    const auto tokens = RenderAndTokenize(request);
-    if (!tokens || tokens->empty())
+    const auto prepared = PreparePrompt(request);
+    if (!prepared || prepared->tokens.empty())
       return ext::InitialOutputState::kAuto;
-    const std::size_t tail = std::min<std::size_t>(tokens->size(), 6);
-    std::string text = Decode(std::span(*tokens).last(tail));
-    while (!text.empty() && std::isspace(static_cast<unsigned char>(text.back())))
+    const auto& tokens = prepared->tokens;
+    const std::size_t tail = std::min<std::size_t>(tokens.size(), 4);
+    std::string text = Decode(std::span(tokens).last(tail));
+    while (!text.empty() &&
+           std::isspace(static_cast<unsigned char>(text.back())))
       text.pop_back();
-    const auto markup = ReasoningDelimiters();
+    const auto tags = ReasoningBudgetTags();
     const auto ends_with = [&](std::string_view suffix) {
       return !suffix.empty() && text.size() >= suffix.size() &&
-             text.compare(text.size() - suffix.size(), suffix.size(), suffix) == 0;
+             text.compare(text.size() - suffix.size(), suffix.size(),
+                          suffix) == 0;
     };
-    if (ends_with(markup.close))
-      return ext::InitialOutputState::kTextAfterThought;
-    if (ends_with(markup.open))
+    if (ends_with(tags.start))
       return ext::InitialOutputState::kThought;
     return ext::InitialOutputState::kAuto;
   }
@@ -579,43 +778,42 @@ public:
   [[nodiscard]] std::unique_ptr<ext::ComponentCacheResources>
   CreateComponentCacheResources(cache::ResourceLedger& ledger,
                                 std::size_t) const override {
-    // Host blocks for row markers, committed once and charged to the ledger.
+    // One ledger block per retainable checkpoint: when Gufo's cache holds
+    // kCheckpoints entries, a new capture makes it evict one first.
     struct Block {
       cache::ResourceCharge pool;
-      std::span<std::byte> data;
-      std::shared_ptr<const void> owner;
     };
-    auto storage = std::make_shared<std::vector<std::byte>>(
-        kMarkerBlocks * kMarkerBlockBytes);
     auto blocks = std::make_shared<std::vector<Block>>();
-    for (std::size_t i = 0; i < kMarkerBlocks; ++i) {
-      auto bytes = std::span(*storage).subspan(i * kMarkerBlockBytes,
-                                               kMarkerBlockBytes);
+    for (std::size_t i = 0; i < kCheckpoints; ++i)
       blocks->push_back(
-          {ledger.Reserve(cache::ResourceCategory::kBackingFree,
-                          kMarkerBlockBytes)
-               .Convert(),
-           bytes, std::shared_ptr<const void>(storage, bytes.data())});
-    }
+          {ledger.Reserve(cache::ResourceCategory::kBackingFree, 64).Convert()});
     auto resources = std::make_unique<ext::ComponentCacheResources>();
     resources->owner = blocks;
     resources->adapter = std::make_unique<LoomAdapter>(model_, rows_);
     resources->stream = [] { return std::make_unique<NullStream>(); };
-    resources->allocate = [blocks, storage](const cache::PayloadRequest& request)
+    resources->allocate = [blocks, model = model_](
+                              const cache::PayloadRequest& request)
         -> cache::ComponentCaptureBuffer {
-      for (const auto& block : *blocks) {
-        if (request.bytes > block.data.size() ||
+      for (auto& block : *blocks) {
+        if (request.bytes > kMarkerBytes ||
             block.pool.Info().category != cache::ResourceCategory::kBackingFree)
           continue;
         try {
           auto reservation = std::make_shared<cache::ResourceReservation>(
               block.pool.ReserveBacking(request.category));
-          return {block.data,
-                  [reservation, owner = block.owner] {
-                    return cache::Payload::Committed(reservation->Convert(),
-                                                     owner);
+          auto payload = std::make_shared<EndpointPayload>();
+          payload->model = model;
+          const std::span<std::byte> bytes(payload->bytes);
+          return {bytes,
+                  [reservation, payload] {
+                    // Gufo reads a payload through its owner: alias the
+                    // bytes, keeping the whole payload (and checkpoint) alive.
+                    return cache::Payload::Committed(
+                        reservation->Convert(),
+                        std::shared_ptr<const void>(payload,
+                                                    payload->bytes.data()));
                   },
-                  storage.get()};
+                  payload.get()};
         } catch (const std::bad_alloc&) {
         }
       }
@@ -637,47 +835,60 @@ public:
     return std::make_unique<LoomState>(dynamic_cast<LoomSlot&>(slot), decoder);
   }
 
+  // After a restore the row holds the checkpoint's state at `position`.
   void ReconcileComponentState(ext::TextRunnerState& state,
                                std::size_t position) const override {
     auto& loom = Require(state);
-    if (position != 0)
-      throw std::logic_error("loom rows restore only to an empty state");
     std::lock_guard lock(model_->mutex());
-    ResetLocked(loom);
+    loom.slot->position = position;
+    if (position == 0) {
+      ResetRowLocked(loom);
+      return;
+    }
+    loom.slot->stale = false;
   }
 
   [[nodiscard]] ext::TextPrefillStep Prefill(
       ext::TextRunnerState& state, std::span<const TextRunnerToken> prompt,
       std::size_t offset, std::size_t max_input_tokens) const override {
     auto& loom = Require(state);
-    if (offset != loom.position || offset >= prompt.size())
+    if (offset != loom.position() || offset >= prompt.size())
       throw std::invalid_argument("loom prefill must continue the row");
-    const std::size_t count =
-        std::min(prompt.size() - offset, std::max<std::size_t>(max_input_tokens, 1));
+    const std::size_t count = std::min(
+        prompt.size() - offset, std::max<std::size_t>(max_input_tokens, 1));
     const bool last = offset + count == prompt.size();
     std::lock_guard lock(model_->mutex());
     auto* embed = model_->embed();
-    if (offset == 0) {
-      ResetLocked(loom);
-      const std::uint64_t extent = std::min<std::uint64_t>(
-          model_->info().context_capacity, prompt.size() + kExtentSlack);
-      if (model_->Check(loom_text_embed_row_begin(embed, loom.row, nullptr,
+    const std::uint64_t extent = std::min<std::uint64_t>(
+        model_->info().context_capacity, prompt.size() + kExtentSlack);
+    if (offset == 0 || loom.slot->stale) {
+      if (offset != 0)
+        throw std::logic_error("loom row lost its state");
+      ResetRowLocked(loom);
+      if (model_->Check(loom_text_embed_row_begin(embed, loom.row(), nullptr,
                                                   extent, 1),
                         "reserve", 1) != 0)
         throw cache::ResourceExhausted();
+    } else if (loom_text_embed_row_extent(embed, loom.row()) < extent) {
+      if (model_->Check(
+              loom_text_embed_row_extend(embed, loom.row(), extent), "reserve",
+              1) != 0)
+        throw cache::ResourceExhausted();
+      loom.bound.clear();
     }
-    // Hold the prompt's final token back until the sampler is known.
-    const std::size_t now = last ? count - 1 : count;
-    if (now > 0) {
-      std::vector<std::int32_t> chunk(prompt.begin() + offset,
-                                      prompt.begin() + offset + now);
-      model_->Check(loom_text_embed_row_prefill(embed, loom.row, chunk.data(),
-                                                chunk.size()),
+    // A deferred token from the last prefill (or a restored checkpoint)
+    // enters state first; this prompt's final token waits for its sampler.
+    std::vector<std::int32_t> input;
+    if (loom.slot->deferred >= 0)
+      input.push_back(static_cast<std::int32_t>(loom.slot->deferred));
+    input.insert(input.end(), prompt.begin() + offset,
+                 prompt.begin() + offset + count - (last ? 1 : 0));
+    loom.slot->deferred = last ? static_cast<std::int64_t>(prompt.back()) : -1;
+    if (!input.empty())
+      model_->Check(loom_text_embed_row_prefill(embed, loom.row(), input.data(),
+                                                input.size()),
                     "prefill");
-    }
-    if (last)
-      loom.deferred = prompt.back();
-    loom.SetPosition(loom.position + count);
+    loom.slot->position += count;
     return {.consumed_tokens = count, .decode_ready = last};
   }
 
@@ -700,31 +911,6 @@ public:
     AdvanceLocked(loom, token);
   }
 
-  void AdvanceLocked(LoomState& loom, TextRunnerToken token) const {
-    auto* embed = model_->embed();
-    EnsureExtentLocked(loom, 2);
-    if (!loom.deferred &&
-        static_cast<TextRunnerToken>(
-            loom_text_embed_row_token(embed, loom.row)) == token) {
-      model_->Check(loom_text_embed_row_decode(embed, loom.row), "decode");
-    } else {
-      // A token other than the pending selection replaces it, after any
-      // prompt token still deferred.
-      std::vector<std::int32_t> input;
-      if (loom.deferred)
-        input.push_back(static_cast<std::int32_t>(*loom.deferred));
-      loom.deferred.reset();
-      input.push_back(static_cast<std::int32_t>(token));
-      model_->Check(loom_text_embed_row_prefill(embed, loom.row, input.data(),
-                                                input.size()),
-                    "advance");
-    }
-    loom.generated.push_back(static_cast<std::int32_t>(token));
-    loom.SetPosition(loom.position + 1);
-  }
-
-  // Gufo's single-token batches: rows consuming their own pending selection
-  // advance together in one packed epoch; any other token advances alone.
   void AdvanceBatch(
       std::span<const ext::TextRunnerAdvance> advances) const override {
     std::lock_guard lock(model_->mutex());
@@ -734,16 +920,15 @@ public:
     for (std::size_t i = 0; i < advances.size(); ++i) {
       try {
         auto& loom = Require(advances[i].state.get());
-        const auto token = advances[i].token;
-        if (loom.deferred ||
-            static_cast<TextRunnerToken>(
-                loom_text_embed_row_token(embed, loom.row)) != token) {
-          AdvanceLocked(loom, token);
+        if (loom.slot->deferred >= 0 ||
+            static_cast<TextRunnerToken>(loom_text_embed_row_token(
+                embed, loom.row())) != advances[i].token) {
+          AdvanceLocked(loom, advances[i].token);
           continue;
         }
         EnsureExtentLocked(loom, 2);
         packed.push_back(i);
-        rows.push_back(loom.row);
+        rows.push_back(loom.row());
       } catch (...) {
         if (advances[i].failure == nullptr)
           throw;
@@ -757,7 +942,7 @@ public:
           loom_text_embed_decode_batch(embed, rows.data(), rows.size()),
           "decode");
       for (const auto i : packed)
-        CommitLocked(Require(advances[i].state.get()), advances[i].token);
+        CommitLocked(Require(advances[i].state.get()));
     } catch (...) {
       for (const auto i : packed) {
         if (advances[i].failure == nullptr)
@@ -778,7 +963,9 @@ public:
   }
 
   // One packed epoch for every session Gufo batches; drafted when the
-  // package has a drafter and the session may take more than one token.
+  // package has a drafter. After the epoch each row's next selection is
+  // known, so a response that ends here releases its withheld output (tool
+  // calls) with its last token.
   [[nodiscard]] std::vector<ext::TextDecodeStep> DecodeBatch(
       std::span<const ext::TextRunnerDecode> decodes) const override {
     std::vector<ext::TextDecodeStep> steps(decodes.size());
@@ -790,17 +977,19 @@ public:
     for (std::size_t i = 0; i < decodes.size(); ++i) {
       try {
         auto& loom = Require(decodes[i].state.get());
-        if (decodes[i].max_tokens == 0)
+        const std::size_t remaining = decodes[i].max_tokens;
+        if (remaining == 0)
           continue;
         auto& sampler = decodes[i].sampler.get();
         Unconstrain(loom, sampler);
         PrepareLocked(loom, sampler.config());
         if (const auto forced = sampler.ForcedToken()) {
-          // Gufo's reasoning budget forces this token: consume it in place
-          // of the row's own selection.
+          // Gufo's reasoning budget forces this token in place of the
+          // row's own selection.
           steps[i].selections.push_back(
               {.token = *forced, .piece = PieceLocked(loom, *forced)});
           AdvanceLocked(loom, *forced);
+          FinishLocked(loom, steps[i], remaining);
           continue;
         }
         auto selection = SelectionLocked(loom);
@@ -809,14 +998,14 @@ public:
           continue;
         }
         const std::uint32_t limit =
-            depth == 0 || decodes[i].max_tokens < 2
+            depth == 0 || remaining < 2
                 ? 0
                 : static_cast<std::uint32_t>(
-                      std::min<std::size_t>(depth + 1, decodes[i].max_tokens));
+                      std::min<std::size_t>(depth + 1, remaining));
         EnsureExtentLocked(loom, limit ? depth + 2 : 2);
         steps[i].selections.push_back(std::move(selection));
         active.push_back(i);
-        rows.push_back(loom.row);
+        rows.push_back(loom.row());
         limits.push_back(limit);
       } catch (...) {
         steps[i].failure = std::current_exception();
@@ -824,16 +1013,18 @@ public:
     }
     if (active.empty())
       return steps;
-    const bool drafted =
-        std::any_of(limits.begin(), limits.end(), [](auto l) { return l; });
     try {
+      const bool drafted =
+          std::any_of(limits.begin(), limits.end(), [](auto l) { return l; });
       if (!drafted) {
         model_->Check(
             loom_text_embed_decode_batch(embed, rows.data(), rows.size()),
             "decode");
-        for (const auto i : active)
-          CommitLocked(Require(decodes[i].state.get()),
-                       steps[i].selections.front().token);
+        for (std::size_t k = 0; k < active.size(); ++k) {
+          auto& loom = Require(decodes[active[k]].state.get());
+          CommitLocked(loom);
+          FinishLocked(loom, steps[active[k]], decodes[active[k]].max_tokens);
+        }
         return steps;
       }
       std::vector<std::int32_t> tokens(16 * rows.size());
@@ -845,19 +1036,20 @@ public:
       for (std::size_t k = 0; k < active.size(); ++k) {
         auto& step = steps[active[k]];
         auto& loom = Require(decodes[active[k]].state.get());
-        CommitLocked(loom, step.selections.front().token);
+        CommitLocked(loom);
         // Every output but the last entered state; the last stays pending.
         for (std::uint32_t j = 0; j + 1 < counts[k]; ++j) {
+          const auto token = static_cast<TextRunnerToken>(tokens[16 * k + j]);
           step.selections.push_back(
-              {.token = static_cast<TextRunnerToken>(tokens[16 * k + j]),
-               .piece = PieceLocked(loom, tokens[16 * k + j])});
-          CommitLocked(loom, static_cast<TextRunnerToken>(tokens[16 * k + j]));
+              {.token = token, .piece = PieceLocked(loom, token)});
+          CommitLocked(loom);
         }
         if (limits[k]) {
           step.draft_rounds = 1;
           step.draft_tokens = depth;
           step.draft_accepted_tokens = counts[k] ? counts[k] - 1 : 0;
         }
+        FinishLocked(loom, step, decodes[active[k]].max_tokens);
       }
     } catch (...) {
       const auto failure = std::current_exception();
@@ -869,28 +1061,10 @@ public:
 
   [[nodiscard]] std::size_t CheckpointPosition(
       const ext::TextRunnerState& state) const override {
-    return dynamic_cast<const LoomState&>(state).position;
+    return dynamic_cast<const LoomState&>(state).position();
   }
 
 private:
-  static constexpr std::uint64_t kExtentSlack = 1024;
-  static constexpr std::size_t kMarkerBlocks = 64;
-  static constexpr std::size_t kMarkerBlockBytes = 64;
-  // Marker blocks plus the cache's per-slot metadata.
-  static constexpr std::size_t kHostCacheBytes = std::size_t{8} << 20;
-
-  std::vector<TextRunnerToken> TokenizeLocked(std::string_view text,
-                                              bool special) const {
-    // A token covers at least one byte; leave room for added specials.
-    std::vector<std::int32_t> tokens(text.size() + 16);
-    std::size_t count = 0;
-    model_->Check(loom_text_embed_tokenize(model_->embed(), text.data(),
-                                           text.size(), special, tokens.data(),
-                                           tokens.size(), &count),
-                  "tokenize");
-    return std::vector<TextRunnerToken>(tokens.begin(), tokens.begin() + count);
-  }
-
   std::string DecodeLocked(const std::vector<std::int32_t>& tokens) const {
     if (tokens.empty())
       return {};
@@ -903,15 +1077,16 @@ private:
         text.resize(size);
         return text;
       }
-      if (attempt == 6 || std::string_view(loom_text_embed_error(model_->embed()))
-                                   .find("RESOURCE_EXHAUSTED") == std::string_view::npos)
+      if (attempt == 6 ||
+          std::string_view(loom_text_embed_error(model_->embed()))
+                  .find("RESOURCE_EXHAUSTED") == std::string_view::npos)
         model_->Check(1, "detokenize");
       text.resize(text.size() * 4);
     }
   }
 
   // Releases the request's grammar once: the package samples on device, so
-  // Gufo's token masks cannot apply and output is checked by the parsers.
+  // Gufo's token masks cannot apply; the package's parser reads the output.
   static void Unconstrain(LoomState& loom, sampling::SamplerState& sampler) {
     if (!loom.unconstrained) {
       sampler = sampler.WithoutConstraint();
@@ -919,24 +1094,21 @@ private:
     }
   }
 
-  void ResetLocked(LoomState& loom) const {
-    loom_text_embed_row_end(model_->embed(), loom.row);
-    model_->Check(loom_text_embed_row_reset(model_->embed(), loom.row),
+  void ResetRowLocked(LoomState& loom) const {
+    loom_text_embed_row_end(model_->embed(), loom.row());
+    model_->Check(loom_text_embed_row_reset(model_->embed(), loom.row()),
                   "reset");
-    loom.SetPosition(0);
-    loom.deferred.reset();
+    loom.slot->position = 0;
+    loom.slot->deferred = -1;
+    loom.slot->stale = false;
     loom.bound.clear();
-    loom.generated.clear();
-    loom.unconstrained = false;
-    loom.piece_key.reset();
-    model_->Check(loom_text_embed_decoder_reset(loom.decoder), "decoder");
-    loom.unconstrained = false;
   }
 
   // Binds the request's sampling and consumes a deferred prompt token.
   void PrepareLocked(LoomState& loom,
                      const sampling::SamplingConfig& config) const {
     auto* embed = model_->embed();
+    EnsureExtentLocked(loom, 2);
     std::string body = SamplingBody(model_->info().model_id, config);
     if (body != loom.bound) {
       std::size_t count = 0;
@@ -945,65 +1117,127 @@ private:
                                                  body.size(), nullptr, 0,
                                                  &count, &request),
                     "sampling options");
-      const int status = loom_text_embed_row_bind(embed, loom.row, request);
+      const int status = loom_text_embed_row_bind(embed, loom.row(), request);
       loom_text_embed_request_free(request);
       model_->Check(status, "bind sampling");
       loom.bound = std::move(body);
     }
-    if (loom.deferred) {
-      const std::int32_t token = static_cast<std::int32_t>(*loom.deferred);
-      loom.deferred.reset();
-      model_->Check(loom_text_embed_row_prefill(embed, loom.row, &token, 1),
+    if (loom.slot->deferred >= 0) {
+      const std::int32_t token = static_cast<std::int32_t>(loom.slot->deferred);
+      loom.slot->deferred = -1;
+      model_->Check(loom_text_embed_row_prefill(embed, loom.row(), &token, 1),
                     "prefill");
     }
   }
 
   ext::TextDecodeSelection SelectionLocked(LoomState& loom) const {
     auto* embed = model_->embed();
-    const auto token =
-        static_cast<TextRunnerToken>(loom_text_embed_row_token(embed, loom.row));
-    if (loom.stop_at_eos() && loom_text_embed_row_is_eos(embed, loom.row))
+    const auto token = static_cast<TextRunnerToken>(
+        loom_text_embed_row_token(embed, loom.row()));
+    if (loom.stop_at_eos() && loom_text_embed_row_is_eos(embed, loom.row()))
       return {.stop = true, .token = token};
     return {.token = token, .piece = PieceLocked(loom, token)};
   }
 
-  // Text this token settles, from the row's streaming decoder: the pieces
-  // concatenate to exactly the decoded output (incremental_text_is_exact).
+  void AdvanceLocked(LoomState& loom, TextRunnerToken token) const {
+    auto* embed = model_->embed();
+    EnsureExtentLocked(loom, 2);
+    if (loom.slot->deferred < 0 &&
+        static_cast<TextRunnerToken>(
+            loom_text_embed_row_token(embed, loom.row())) == token) {
+      model_->Check(loom_text_embed_row_decode(embed, loom.row()), "decode");
+    } else {
+      // A token other than the pending selection replaces it, after any
+      // prompt token still deferred.
+      std::vector<std::int32_t> input;
+      if (loom.slot->deferred >= 0)
+        input.push_back(static_cast<std::int32_t>(loom.slot->deferred));
+      loom.slot->deferred = -1;
+      input.push_back(static_cast<std::int32_t>(token));
+      model_->Check(loom_text_embed_row_prefill(embed, loom.row(), input.data(),
+                                                input.size()),
+                    "advance");
+    }
+    CommitLocked(loom);
+  }
+
+  void CommitLocked(LoomState& loom) const {
+    ++loom.generated;
+    ++loom.slot->position;
+  }
+
+  // Text this token settles: decoded by the row's streaming detokenizer,
+  // then read by the request's output reader into canonical markup.
   std::string PieceLocked(LoomState& loom, std::int32_t token) const {
-    const std::pair<std::size_t, std::int32_t> key{loom.generated.size(),
-                                                   token};
+    const std::pair<std::size_t, std::int32_t> key{loom.generated, token};
     if (loom.piece_key == key)
       return loom.piece;
     if (loom.piece_key && loom.piece_key->first == key.first)
       throw std::logic_error("loom selection changed before it was consumed");
-    std::string text(256, '\0');
+    std::string raw(256, '\0');
     std::size_t size = 0;
     model_->Check(loom_text_embed_decoder_feed(loom.decoder, &token, 1,
-                                               text.data(), text.size(), &size),
+                                               raw.data(), raw.size(), &size),
                   "decode");
-    text.resize(size);
+    raw.resize(size);
     loom.piece_key = key;
-    loom.piece = text;
+    loom.piece = OutputLocked(loom, raw, false);
+    loom.produced = true;
+    return loom.piece;
+  }
+
+  std::string OutputLocked(LoomState& loom, std::string_view raw,
+                           bool final) const {
+    if (loom.context == nullptr || loom.flushed)
+      return std::string(raw);
+    std::string text(raw.size() + kTextBuffer, '\0');
+    std::size_t size = 0;
+    model_->Check(loom_text_embed_output_feed(loom.context->request, raw.data(),
+                                              raw.size(), final, text.data(),
+                                              text.size(), &size),
+                  "read output");
+    text.resize(size);
     return text;
   }
 
-  void CommitLocked(LoomState& loom, TextRunnerToken token) const {
-    loom.generated.push_back(static_cast<std::int32_t>(token));
-    loom.SetPosition(loom.position + 1);
+  // Ends the response when the next selection is EOS or the token budget is
+  // spent: releases withheld text and the parsed tool calls.
+  void FinishLocked(LoomState& loom, ext::TextDecodeStep& step,
+                    std::size_t remaining) const {
+    if (loom.context == nullptr || loom.flushed || step.selections.empty())
+      return;
+    auto* embed = model_->embed();
+    const bool eos =
+        loom.stop_at_eos() && loom_text_embed_row_is_eos(embed, loom.row());
+    const bool spent = step.selections.size() >= remaining;
+    if (!eos && !spent)
+      return;
+    std::string tail = OutputLocked(loom, {}, true);
+    std::string json(kTextBuffer, '\0');
+    std::size_t size = 0;
+    if (loom_text_embed_output_tools(loom.context->request, eos ? 0 : 1,
+                                     json.data(), json.size(), &size) == 0) {
+      json.resize(size);
+      tail += ToolMarkup(json);
+    }
+    loom.flushed = true;
+    step.selections.back().piece += tail;
   }
 
   // Grows the row's reservation before a step that consumes `step` tokens.
   void EnsureExtentLocked(LoomState& loom, std::uint64_t step) const {
     auto* embed = model_->embed();
-    const std::uint64_t position = loom_text_embed_row_position(embed, loom.row);
+    const std::uint64_t position =
+        loom_text_embed_row_position(embed, loom.row()) +
+        (loom.slot->deferred >= 0 ? 1 : 0);
     const std::uint64_t context = model_->info().context_capacity;
-    if (position + step <= loom_text_embed_row_extent(embed, loom.row))
+    if (position + step <= loom_text_embed_row_extent(embed, loom.row()))
       return;
     const std::uint64_t extent =
         std::min<std::uint64_t>(context, position + step + kExtentSlack);
     if (position + step > extent)
       throw std::length_error("loom row reached the context capacity");
-    if (model_->Check(loom_text_embed_row_extend(embed, loom.row, extent),
+    if (model_->Check(loom_text_embed_row_extend(embed, loom.row(), extent),
                       "reserve", 1) != 0)
       throw cache::ResourceExhausted();
     // The reservation restarted the request; bind its sampling again.
@@ -1020,8 +1254,7 @@ std::shared_ptr<ext::TextModelRunner> CreateLoomRunner(
   try {
     auto model = std::make_shared<LoomModel>(
         options.model_path, options.provider_options, options.session_count);
-    return std::make_shared<LoomRunner>(std::move(model),
-                                        options.session_count);
+    return std::make_shared<LoomRunner>(std::move(model));
   } catch (const std::exception& exception) {
     if (error != nullptr)
       *error = exception.what();

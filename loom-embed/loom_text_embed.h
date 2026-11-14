@@ -37,6 +37,8 @@ typedef struct loom_text_embed_options_t {
   uint64_t memory_bytes;
   // Resident rows (concurrent sessions); zero keeps the preset's count.
   uint32_t rows;
+  // Retained row checkpoints (shared device state); zero selects 64.
+  uint32_t checkpoints;
 } loom_text_embed_options_t;
 
 typedef struct loom_text_embed_info_t {
@@ -68,6 +70,20 @@ int loom_text_embed_chat_prepare(loom_text_embed_t* embed, const char* body,
                                  size_t capacity, size_t* out_count,
                                  loom_text_embed_request_t** out_request);
 void loom_text_embed_request_free(loom_text_embed_request_t* request);
+
+// Output of one prepared chat request, read with the package's own chat
+// program, as loom-serve reads it. feed appends generated text and returns
+// what it settles, normalized: reasoning inside <think>...</think>, answer
+// text as is, framing and tool syntax withheld. final releases the remainder
+// and closes reasoning. tools then parses the withheld tool calls into a JSON
+// array of {"id","type":"function","function":{"name","arguments"}}
+// (truncated: the output hit its token limit; an unfinished call is dropped).
+int loom_text_embed_output_feed(loom_text_embed_request_t* request,
+                                const char* text, size_t text_size, int final,
+                                char* out, size_t capacity, size_t* out_size);
+int loom_text_embed_output_tools(loom_text_embed_request_t* request,
+                                 int truncated, char* json, size_t capacity,
+                                 size_t* out_size);
 
 // Tokenizes raw text; special-token spellings become special tokens when
 // match_special is nonzero. Tokens may be NULL to count only.
@@ -134,6 +150,19 @@ int loom_text_embed_verify_batch(loom_text_embed_t* embed, const uint32_t* rows,
                                  size_t count, const uint32_t* limits,
                                  int32_t* tokens, uint32_t* counts,
                                  uint32_t* consumed);
+
+// Row checkpoints: the exact consumed state of a row, sharing its device
+// pages (copy-on-write) until released. Restoring replaces a row's state.
+// pin returns 1 when checkpoint capacity is exhausted; restore sets
+// *restored to 0 when pool capacity is short.
+typedef struct loom_text_embed_checkpoint_t loom_text_embed_checkpoint_t;
+int loom_text_embed_row_pin(loom_text_embed_t* embed, uint32_t row,
+                            loom_text_embed_checkpoint_t** out_checkpoint);
+int loom_text_embed_row_restore(loom_text_embed_t* embed, uint32_t row,
+                                const loom_text_embed_checkpoint_t* checkpoint,
+                                int* restored);
+void loom_text_embed_checkpoint_release(loom_text_embed_t* embed,
+                                        loom_text_embed_checkpoint_t* checkpoint);
 
 #ifdef __cplusplus
 }  // extern "C"
