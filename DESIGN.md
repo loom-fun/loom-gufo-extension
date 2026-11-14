@@ -59,6 +59,10 @@ existing text model layer:
 - rows (`row_begin`, `row_prefill`, `row_decode`), packed `decode_batch`
   over `model_epoch`, drafted `verify_batch` over `model_verify`, and row
   checkpoints (`row_pin`/`row_restore`) for Gufo's prefix cache;
+- checkpoint images (`checkpoint_export`/`checkpoint_import`): a checkpoint's
+  pages, recurrent state and carry as position-independent bytes, using the
+  same range plan and transfers Loom uses to suspend a checkpoint, for Gufo's
+  disk tier;
 - the package's chat program: rendering, sampling options, streaming output
   classification and tool-call parsing; images through the media projector;
 - tokenize, detokenize and a streaming decoder.
@@ -79,11 +83,9 @@ package's kernels unchanged.
   Packages sample on device and logits never leave it; tools and JSON work
   unconstrained, as in loom-serve. Next step: one Loom ABI addition (logits
   readback or a host-sampling hook) and regenerated packages.
-- **No disk tier for the prompt cache.** The RAM tier works on Loom row
-  checkpoints, which live on the device.
-- **`usage.reasoning_tokens` reads 0** for packages whose native reasoning
-  markup is not `<think>` (gpt-oss, Muse-Glimmer): Gufo counts it by
-  re-decoding raw tokens. The reasoning text itself is split correctly.
+- **Disk tier needs elastic state.** With `--cache-disk`, cache entries are
+  portable checkpoint images; a preset without elastic pooled state keeps the
+  cache in device memory (the runner says so at load).
 - **Greedy outputs can differ from loom-serve at near-ties.** Loom's results
   depend on batch shape (drafted verify windows, prefill chunks); loom-serve
   itself gives a different greedy haiku for Qwen3-8B under load.

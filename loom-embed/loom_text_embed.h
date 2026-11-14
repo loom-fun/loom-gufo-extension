@@ -187,6 +187,41 @@ int loom_text_embed_row_restore(loom_text_embed_t* embed, uint32_t row,
 void loom_text_embed_checkpoint_release(loom_text_embed_t* embed,
                                         loom_text_embed_checkpoint_t* checkpoint);
 
+// Checkpoint images: a checkpoint's retained state as portable host bytes
+// (no device addresses or page IDs), for caches that persist state. An image
+// is fixed_bytes of fixed state (recurrence, carry), then one page per started
+// block of block_size tokens, in token order, each page_bytes long; a page
+// depends only on the tokens before its end. supported is zero when the
+// preset's state is not elastic (images then cannot be restored).
+typedef struct loom_text_embed_image_layout_t {
+  uint32_t block_size;
+  uint64_t fixed_bytes;
+  uint64_t page_bytes;
+  int supported;
+} loom_text_embed_image_layout_t;
+void loom_text_embed_image_layout(loom_text_embed_t* embed,
+                                  loom_text_embed_image_layout_t* out_layout);
+
+typedef struct loom_text_embed_checkpoint_info_t {
+  uint32_t position;
+  uint32_t source_position;
+  int32_t token;
+  int has_prediction;
+} loom_text_embed_checkpoint_info_t;
+
+// Writes a resident checkpoint's image (*out_size is set even when capacity
+// is short, which fails).
+int loom_text_embed_checkpoint_export(
+    loom_text_embed_t* embed, const loom_text_embed_checkpoint_t* checkpoint,
+    uint8_t* image, size_t capacity, size_t* out_size,
+    loom_text_embed_checkpoint_info_t* out_info);
+// Creates a resident checkpoint from an image (fresh pages, committed backing,
+// contents uploaded). Returns 1 when checkpoint or page capacity is short.
+int loom_text_embed_checkpoint_import(
+    loom_text_embed_t* embed, const loom_text_embed_checkpoint_info_t* info,
+    const uint8_t* image, size_t size,
+    loom_text_embed_checkpoint_t** out_checkpoint);
+
 #ifdef __cplusplus
 }  // extern "C"
 #endif

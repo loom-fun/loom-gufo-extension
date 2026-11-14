@@ -367,6 +367,33 @@ def _():
           f"reasoning_tokens={rt} reasoning_chars={len(reasoning)} content={(m.get('content') or '')[:40]!r}")
 
 
+@guarded("reasoning token usage")
+def _():
+    s, r = chat(user("Is 91 prime? Answer briefly."), max_tokens=2500, chat_template_kwargs={"enable_thinking": True})
+    if s != 200:
+        check("reasoning token usage", "fail", r)
+        return
+    reasoning = r["choices"][0]["message"].get("reasoning_content") or ""
+    rt = r["usage"].get("completion_tokens_details", {}).get("reasoning_tokens", 0)
+    ok = bool(reasoning) == (rt > 0) and rt <= r["usage"]["completion_tokens"]
+    check("reasoning token usage", "pass" if ok else "fail", f"reasoning_chars={len(reasoning)} reasoning_tokens={rt}")
+
+
+@guarded("reasoning effort")
+def _():
+    out = {}
+    for effort in ("low", "high"):
+        s, r = chat(user("What is 23*17? Give the number."), max_tokens=2500, reasoning_effort=effort)
+        if s != 200:
+            check("reasoning effort", "fail", f"{effort}: {r}")
+            return
+        m = r["choices"][0]["message"]
+        out[effort] = (len(m.get("reasoning_content") or ""), m.get("content") or "")
+    ok = all("391" in c for _, c in out.values())
+    check("reasoning effort", "pass" if ok else "fail",
+          f"low reasoning {out['low'][0]} chars, high {out['high'][0]} chars")
+
+
 json.dump({"model": MODEL, "results": results}, open(OUT, "w"), indent=1)
 counts = {k: sum(r["status"] == k for r in results) for k in ("pass", "fail", "gap")}
 print(json.dumps(counts))

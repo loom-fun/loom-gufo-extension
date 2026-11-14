@@ -21,396 +21,11 @@
 // top-p, seed); Gufo's grammar constraints, logprobs, min-p and penalties
 // need logits, which Loom packages do not expose.
 
-#include <cstdlib>
-#include <cstdio>
-#include <loom_text_embed.h>
-
-#include <algorithm>
-#include <array>
-#include <cctype>
-#include <chrono>
-#include <cstdint>
-#include <cstring>
-#include <filesystem>
-#include <fstream>
-#include <iterator>
-#include <memory>
-#include <mutex>
-#include <optional>
-#include <sstream>
-#include <stdexcept>
-#include <string>
-#include <string_view>
-#include <unordered_map>
-#include <vector>
-
-#include <gufo/ext/generated/loom_constants.hpp>
-#include <gufo/ext/json.hpp>
-#include <gufo/ext/registry.hpp>
-#include <gufo/ext/sha256.hpp>
-#include <gufo/ext/text.hpp>
+#include "loom_cache.hpp"
+#include "loom_chat.hpp"
 
 namespace gufo::loom {
 namespace {
-
-namespace fs = std::filesystem;
-using ext::TextRunnerToken;
-
-constexpr std::uint64_t kExtentSlack = 1024;
-// Retained row checkpoints, and host blocks naming them in Gufo's cache.
-constexpr std::size_t kCheckpoints = 64;
-constexpr std::size_t kMarkerBytes = 16;
-// Marker blocks plus the cache's per-slot metadata.
-constexpr std::size_t kHostCacheBytes = std::size_t{8} << 20;
-constexpr std::size_t kTextBuffer = 1 << 16;
-
-// ---------------------------------------------------------------- probe ---
-
-std::optional<fs::path> ManifestPath(std::string_view model_root) {
-  std::error_code error;
-  fs::path path(model_root);
-  if (fs::is_directory(path, error))
-    path /= "model.json";
-  if (path.filename() != "model.json" || !fs::is_regular_file(path, error))
-    return std::nullopt;
-  return path;
-}
-
-// A Loom model card with programs and a service of kind "text".
-bool ProbeLoomText(std::string_view model_root) {
-  const auto manifest = ManifestPath(model_root);
-  if (!manifest)
-    return false;
-  std::error_code error;
-  if (fs::file_size(*manifest, error) > (std::size_t{4} << 20) || error)
-    return false;
-  std::ifstream in(*manifest, std::ios::binary);
-  const std::string text((std::istreambuf_iterator<char>(in)), {});
-  try {
-    const auto card = json::parse(text);
-    const auto* services = card.find("services");
-    if (!card.contains("schema_version") || !card.contains("programs") ||
-        services == nullptr || !services->is_object())
-      return false;
-    for (const auto& [name, service] : services->members()) {
-      (void)name;
-      if (service.is_object() && service.member_str("kind") == "text")
-        return true;
-    }
-  } catch (const std::exception&) {
-  }
-  return false;
-}
-
-// ---------------------------------------------------------------- model ---
-
-// One opened package; every Loom call is serialized on its mutex (recursive:
-// releasing a cache entry can release a checkpoint inside a runner call).
-class LoomModel {
-public:
-  LoomModel(const std::string& path, const ext::ParsedOptions& options,
-            std::size_t sessions) {
-    std::string preset, device;
-    std::uint64_t memory = 0;
-    if (const auto* value =
-            ext::FindOption<std::string>(options, "--loom-preset"))
-      preset = *value;
-    if (const auto* value =
-            ext::FindOption<std::string>(options, "--loom-device"))
-      device = *value;
-    if (const auto* value =
-            ext::FindOption<std::int64_t>(options, "--loom-memory-bytes"))
-      memory = static_cast<std::uint64_t>(*value);
-    loom_text_embed_options_t embed_options{
-        .model_path = path.c_str(),
-        .preset = preset.c_str(),
-        .device_uri = device.empty() ? nullptr : device.c_str(),
-        .memory_bytes = memory,
-        .rows = static_cast<std::uint32_t>(std::max<std::size_t>(sessions, 1)),
-        .checkpoints = kCheckpoints,
-    };
-    char error[2048] = {};
-    if (loom_text_embed_open(&embed_options, &embed_, error, sizeof(error)))
-      throw std::runtime_error(std::string("loom: ") + error);
-    loom_text_embed_info(embed_, &info_);
-  }
-  ~LoomModel() {
-    for (auto& [id, checkpoint] : checkpoints_)
-      loom_text_embed_checkpoint_release(embed_, checkpoint);
-    loom_text_embed_close(embed_);
-  }
-  LoomModel(const LoomModel&) = delete;
-  LoomModel& operator=(const LoomModel&) = delete;
-
-  [[nodiscard]] const loom_text_embed_info_t& info() const { return info_; }
-  [[nodiscard]] loom_text_embed_t* embed() const { return embed_; }
-  std::recursive_mutex& mutex() const { return mutex_; }
-
-  // Throws on a nonzero status other than `allowed`.
-  int Check(int status, const char* what, int allowed = 0) const {
-    if (status != 0 && status != allowed)
-      throw std::runtime_error(std::string("loom: ") + what + ": " +
-                               loom_text_embed_error(embed_));
-    return status;
-  }
-
-  // Checkpoint handles named by cache payloads.
-  std::uint64_t Keep(loom_text_embed_checkpoint_t* checkpoint) {
-    const auto id = next_checkpoint_++;
-    checkpoints_.emplace(id, checkpoint);
-    return id;
-  }
-  loom_text_embed_checkpoint_t* Find(std::uint64_t id) const {
-    const auto found = checkpoints_.find(id);
-    return found == checkpoints_.end() ? nullptr : found->second;
-  }
-  void Release(std::uint64_t id) {
-    std::lock_guard lock(mutex_);
-    const auto found = checkpoints_.find(id);
-    if (found == checkpoints_.end())
-      return;
-    loom_text_embed_checkpoint_release(embed_, found->second);
-    checkpoints_.erase(found);
-  }
-
-private:
-  loom_text_embed_t* embed_{nullptr};
-  loom_text_embed_info_t info_{};
-  mutable std::recursive_mutex mutex_;
-  std::unordered_map<std::uint64_t, loom_text_embed_checkpoint_t*>
-      checkpoints_;
-  std::uint64_t next_checkpoint_{1};
-};
-
-// One request's output reader (the package's chat program and parser).
-class LoomPromptContext final : public ext::TextPromptContext {
-public:
-  LoomPromptContext(std::shared_ptr<LoomModel> model,
-                    loom_text_embed_request_t* request)
-      : model(std::move(model)), request(request) {}
-  ~LoomPromptContext() override {
-    std::lock_guard lock(model->mutex());
-    loom_text_embed_request_free(request);
-  }
-  std::shared_ptr<LoomModel> model;
-  loom_text_embed_request_t* request;
-  // Input ranges replaced by projected image features; images are projected
-  // on the first prefill that needs them.
-  std::vector<std::pair<std::size_t, std::size_t>> images;
-  mutable bool projected{false};
-  // Reasoning tokens allowed before the runner closes reasoning.
-  std::optional<std::size_t> reasoning_budget;
-  // The prompt ends inside an open reasoning block.
-  bool opens_reasoning{false};
-  [[nodiscard]] bool has_images() const { return !images.empty(); }
-};
-
-// ---------------------------------------------------------------- cache ---
-
-// Free Loom rows, shared by the adapter and its slots.
-struct RowPool {
-  std::mutex mutex;
-  std::vector<bool> used;
-};
-
-class LoomSlot final : public cache::Slot {
-public:
-  LoomSlot(std::uint32_t row, std::shared_ptr<RowPool> pool)
-      : row_(row), pool_(std::move(pool)) {}
-  ~LoomSlot() override {
-    std::lock_guard lock(pool_->mutex);
-    pool_->used[row_] = false;
-  }
-  [[nodiscard]] bool IsValid() const noexcept override { return true; }
-  [[nodiscard]] std::uint32_t row() const { return row_; }
-  // Tokens Gufo counts as consumed, and the prompt token still deferred
-  // (consumed by Gufo's count, not yet by the Loom row).
-  std::size_t position{0};
-  std::int64_t deferred{-1};
-  // A restore in progress loaded its checkpoint.
-  bool restore_ok{false};
-  // The Loom row must be reset before reuse.
-  bool stale{true};
-
-private:
-  std::uint32_t row_;
-  std::shared_ptr<RowPool> pool_;
-};
-
-// The one component: the row endpoint, held on device by a Loom checkpoint
-// and named in Gufo's cache by {checkpoint id, deferred token}.
-constexpr cache::ComponentId kEndpoint{1};
-const cache::ComponentDescriptor kEndpointDescriptor{
-    .id = kEndpoint,
-    .layout_version = 1,
-    .kind = cache::ComponentKind::kPrivateState,
-    .state_bytes = kMarkerBytes,
-};
-
-class DoneSignal final : public cache::CompletionSignal {
-public:
-  explicit DoneSignal(cache::TransferResult result) : result_(result) {}
-  [[nodiscard]] bool Ready() const noexcept override { return true; }
-  [[nodiscard]] cache::TransferResult Wait() noexcept override {
-    return result_;
-  }
-
-private:
-  cache::TransferResult result_;
-};
-
-cache::Completion Done(bool ok) {
-  return cache::Completion(std::make_unique<DoneSignal>(
-      ok ? cache::TransferResult::kSucceeded : cache::TransferResult::kFailed));
-}
-
-struct Endpoint {
-  std::uint64_t checkpoint;
-  std::int64_t deferred;
-};
-
-// Owns the bytes of one cache payload; the checkpoint they name lives as
-// long as Gufo keeps the payload.
-struct EndpointPayload {
-  std::shared_ptr<LoomModel> model;
-  std::array<std::byte, kMarkerBytes> bytes{};
-  ~EndpointPayload() {
-    Endpoint endpoint{};
-    std::memcpy(&endpoint, bytes.data(), sizeof(endpoint));
-    if (endpoint.checkpoint != 0)
-      model->Release(endpoint.checkpoint);
-  }
-};
-
-class LoomAdapter final : public cache::Adapter {
-public:
-  LoomAdapter(std::shared_ptr<LoomModel> model, std::uint32_t rows)
-      : model_(std::move(model)), pool_(std::make_shared<RowPool>()) {
-    pool_->used.assign(rows, false);
-  }
-  [[nodiscard]] cache::Capabilities GetCapabilities() const override {
-    // Checkpoints live on device, so entries are never written to disk.
-    return {.continuation = true, .persistent_encoding = false};
-  }
-  [[nodiscard]] std::span<const cache::ComponentDescriptor> Components()
-      const override {
-    return std::span(&kEndpointDescriptor, 1);
-  }
-  [[nodiscard]] cache::Identity CompatibilityIdentity() const override {
-    const std::string id =
-        std::string("loom-text-2:") + model_->info().model_id;
-    return cache::Identity(id.begin(), id.end());
-  }
-  [[nodiscard]] std::unique_ptr<cache::Slot> CreateSlot(
-      cache::MutationGuard&) override {
-    std::lock_guard lock(pool_->mutex);
-    for (std::uint32_t row = 0; row < pool_->used.size(); ++row) {
-      if (!pool_->used[row]) {
-        pool_->used[row] = true;
-        return std::make_unique<LoomSlot>(row, pool_);
-      }
-    }
-    throw cache::ResourceExhausted();
-  }
-  [[nodiscard]] std::vector<cache::ComponentPosition> Positions(
-      const cache::Slot& slot) const override {
-    return {{.id = kEndpoint,
-             .valid_rows = dynamic_cast<const LoomSlot&>(slot).position}};
-  }
-  [[nodiscard]] std::vector<cache::Rows> PlanPrefill(
-      const cache::Slot&, cache::Rows first, cache::Rows end) const override {
-    std::vector<cache::Rows> boundaries;
-    if (first >= end)
-      return boundaries;
-    const cache::Rows step =
-        std::max<cache::Rows>(model_->info().prefill_capacity, 1);
-    for (cache::Rows at = first + step; at < end; at += step)
-      boundaries.push_back(at);
-    boundaries.push_back(end);
-    return boundaries;
-  }
-  void BeginRestore(
-      cache::Slot& slot,
-      std::span<const cache::ComponentPosition> positions) override {
-    auto& loom = dynamic_cast<LoomSlot&>(slot);
-    loom.restore_ok = false;
-    loom.position = positions.empty() ? 0 : positions.front().valid_rows;
-  }
-  [[nodiscard]] cache::Completion CapturePrivate(const cache::Slot& slot,
-                                                 cache::ComponentId,
-                                                 std::span<std::byte> bytes,
-                                                 cache::Stream&) override {
-    const auto& loom = dynamic_cast<const LoomSlot&>(slot);
-    std::lock_guard lock(model_->mutex());
-    // Loom pins only a nonempty row.
-    if (loom_text_embed_row_position(model_->embed(), loom.row()) == 0)
-      return Done(false);
-    loom_text_embed_checkpoint_t* checkpoint = nullptr;
-    if (model_->Check(loom_text_embed_row_pin(model_->embed(), loom.row(),
-                                              &checkpoint),
-                      "pin", 1) != 0)
-      return Done(false);
-    const Endpoint endpoint{model_->Keep(checkpoint), loom.deferred};
-    std::memcpy(bytes.data(), &endpoint,
-                std::min(bytes.size(), sizeof(endpoint)));
-    return Done(true);
-  }
-  [[nodiscard]] cache::Completion CopyRowsOut(const cache::Slot&,
-                                              cache::ComponentId, cache::Rows,
-                                              cache::Rows, std::span<std::byte>,
-                                              cache::Stream&) override {
-    throw std::logic_error("loom endpoints have no rows");
-  }
-  [[nodiscard]] cache::Completion CopyRowsIn(cache::Slot&, cache::ComponentId,
-                                             cache::Rows, cache::Rows,
-                                             std::span<const std::byte>,
-                                             cache::Stream&) override {
-    throw std::logic_error("loom endpoints have no rows");
-  }
-  [[nodiscard]] cache::Completion LoadPrivate(cache::Slot& slot,
-                                              cache::ComponentId,
-                                              std::span<const std::byte> bytes,
-                                              cache::Stream&) override {
-    auto& loom = dynamic_cast<LoomSlot&>(slot);
-    Endpoint endpoint{};
-    std::memcpy(&endpoint, bytes.data(),
-                std::min(bytes.size(), sizeof(endpoint)));
-    std::lock_guard lock(model_->mutex());
-    const auto* checkpoint = model_->Find(endpoint.checkpoint);
-    int restored = 0;
-    if (checkpoint != nullptr)
-      model_->Check(loom_text_embed_row_restore(model_->embed(), loom.row(),
-                                                checkpoint, &restored),
-                    "restore");
-    loom.restore_ok = restored != 0;
-    loom.deferred = endpoint.deferred;
-    loom.stale = !loom.restore_ok;
-    return Done(loom.restore_ok);
-  }
-  [[nodiscard]] bool Validate(
-      cache::Slot& slot, std::span<const cache::ComponentPosition>) override {
-    return dynamic_cast<LoomSlot&>(slot).restore_ok;
-  }
-  [[nodiscard]] bool Invalidate(cache::Slot& slot) noexcept override {
-    auto& loom = dynamic_cast<LoomSlot&>(slot);
-    loom.position = 0;
-    loom.deferred = -1;
-    loom.restore_ok = false;
-    loom.stale = true;
-    return true;
-  }
-
-private:
-  std::shared_ptr<LoomModel> model_;
-  std::shared_ptr<RowPool> pool_;
-};
-
-class NullStream final : public cache::Stream {
-public:
-  [[nodiscard]] cache::TransferResult Synchronize() noexcept override {
-    return cache::TransferResult::kSucceeded;
-  }
-};
 
 // ---------------------------------------------------------------- state ---
 
@@ -454,224 +69,13 @@ LoomState& Require(ext::TextRunnerState& state) {
   return *loom;
 }
 
-// ------------------------------------------------------- chat requests ---
-
-const char* RoleName(ext::ChatRole role) {
-  switch (role) {
-    case ext::ChatRole::kSystem:
-    case ext::ChatRole::kDeveloper:
-      return "system";
-    case ext::ChatRole::kUser:
-      return "user";
-    case ext::ChatRole::kAssistant:
-      return "assistant";
-    case ext::ChatRole::kTool:
-      return "tool";
-  }
-  return "user";
-}
-
-json::Value ParseOr(const std::string& text, json::Value fallback) {
-  try {
-    return json::parse(text);
-  } catch (const std::exception&) {
-    return fallback;
-  }
-}
-
-std::string Base64(std::span<const std::uint8_t> bytes) {
-  static constexpr char kAlphabet[] =
-      "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-  std::string out;
-  out.reserve((bytes.size() + 2) / 3 * 4);
-  for (std::size_t i = 0; i < bytes.size(); i += 3) {
-    const std::uint32_t n = (bytes[i] << 16) |
-                            (i + 1 < bytes.size() ? bytes[i + 1] << 8 : 0) |
-                            (i + 2 < bytes.size() ? bytes[i + 2] : 0);
-    out += kAlphabet[(n >> 18) & 63];
-    out += kAlphabet[(n >> 12) & 63];
-    out += i + 1 < bytes.size() ? kAlphabet[(n >> 6) & 63] : '=';
-    out += i + 2 < bytes.size() ? kAlphabet[n & 63] : '=';
-  }
-  return out;
-}
-
-std::string_view MediaType(std::span<const std::uint8_t> bytes) {
-  if (bytes.size() >= 8 && bytes[0] == 0x89 && bytes[1] == 'P')
-    return "image/png";
-  if (bytes.size() >= 12 && bytes[0] == 'R' && bytes[8] == 'W')
-    return "image/webp";
-  return "image/jpeg";
-}
-
-// Text and images in order, as OpenAI content parts with data URLs.
-json::Value ContentParts(const ext::ChatMessage& message) {
-  json::Value parts = json::Value::array();
-  std::size_t at = 0;
-  const auto text = [&](std::size_t end) {
-    if (end > at) {
-      json::Value part = json::Value::object();
-      part["type"] = "text";
-      part["text"] = message.content.substr(at, end - at);
-      parts.push_back(std::move(part));
-    }
-    at = end;
-  };
-  for (const auto& image : message.images) {
-    text(std::min(image.offset, message.content.size()));
-    const std::span<const std::uint8_t> bytes(*image.bytes);
-    json::Value url = json::Value::object();
-    url["url"] = "data:" + std::string(MediaType(bytes)) + ";base64," +
-                 Base64(bytes);
-    if (image.detail == ext::ChatMessage::ImageDetail::kLow)
-      url["detail"] = "low";
-    json::Value part = json::Value::object();
-    part["type"] = "image_url";
-    part["image_url"] = std::move(url);
-    parts.push_back(std::move(part));
-  }
-  text(message.content.size());
-  return parts;
-}
-
-// The OpenAI chat body the package's chat program renders.
-std::string ChatBody(const std::string& model, const ext::ChatRequest& request,
-                     bool with_effort = true) {
-  json::Value body = json::Value::object();
-  body["model"] = model;
-  json::Value messages = json::Value::array();
-  for (const auto& message : request.messages) {
-    json::Value out = json::Value::object();
-    out["role"] = RoleName(message.role);
-    out["content"] = message.images.empty() ? json::Value(message.content)
-                                             : ContentParts(message);
-    if (message.role == ext::ChatRole::kAssistant) {
-      if (!message.thought.empty())
-        out["reasoning_content"] = message.thought;
-      if (!message.tool_calls.empty()) {
-        json::Value calls = json::Value::array();
-        for (const auto& call : message.tool_calls) {
-          json::Value arguments = json::Value::object();
-          for (const auto& argument : call.arguments)
-            arguments[argument.name] =
-                argument.is_string
-                    ? json::Value(argument.value)
-                    : ParseOr(argument.value, json::Value(argument.value));
-          json::Value function = json::Value::object();
-          function["name"] = call.name;
-          function["arguments"] = arguments.dump();
-          json::Value entry = json::Value::object();
-          entry["id"] = call.id;
-          entry["type"] = "function";
-          entry["function"] = std::move(function);
-          calls.push_back(std::move(entry));
-        }
-        out["tool_calls"] = std::move(calls);
-      }
-    }
-    if (message.role == ext::ChatRole::kTool && !message.tool_call_id.empty())
-      out["tool_call_id"] = message.tool_call_id;
-    messages.push_back(std::move(out));
-  }
-  body["messages"] = std::move(messages);
-  if (!request.tools.empty()) {
-    json::Value tools = json::Value::array();
-    for (const auto& tool : request.tools) {
-      auto definition = ParseOr(tool.definition_json, json::Value());
-      if (!definition.is_object()) {
-        json::Value function = json::Value::object();
-        function["name"] = tool.name;
-        if (!tool.description.empty())
-          function["description"] = tool.description;
-        function["parameters"] =
-            ParseOr(tool.parameters_json, json::Value::object());
-        definition = json::Value::object();
-        definition["type"] = "function";
-        definition["function"] = std::move(function);
-      }
-      tools.push_back(std::move(definition));
-    }
-    body["tools"] = std::move(tools);
-    if (request.tool_choice == ext::ChatRequest::ToolChoice::kNone) {
-      body["tool_choice"] = "none";
-    } else if (request.tool_choice == ext::ChatRequest::ToolChoice::kRequired) {
-      if (request.forced_tool_name.empty()) {
-        body["tool_choice"] = "required";
-      } else {
-        json::Value function = json::Value::object();
-        function["name"] = request.forced_tool_name;
-        json::Value choice = json::Value::object();
-        choice["type"] = "function";
-        choice["function"] = std::move(function);
-        body["tool_choice"] = std::move(choice);
-      }
-    }
-  }
-  if (request.reasoning.enabled.has_value()) {
-    json::Value kwargs = json::Value::object();
-    kwargs["enable_thinking"] = *request.reasoning.enabled;
-    body["chat_template_kwargs"] = std::move(kwargs);
-  }
-  if (with_effort && request.reasoning.effort.has_value() &&
-      request.reasoning.enabled.value_or(true)) {
-    static constexpr const char* kEfforts[] = {"minimal", "low",   "medium",
-                                               "high",    "xhigh", "max"};
-    body["reasoning_effort"] =
-        kEfforts[static_cast<std::size_t>(*request.reasoning.effort)];
-  }
-  return body.dump();
-}
-
-// A request body that only carries sampling, for row binding.
-std::string SamplingBody(const std::string& model,
-                         const sampling::SamplingConfig& config) {
-  json::Value body = json::Value::object();
-  body["model"] = model;
-  json::Value message = json::Value::object();
-  message["role"] = "user";
-  message["content"] = ".";
-  json::Value messages = json::Value::array();
-  messages.push_back(std::move(message));
-  body["messages"] = std::move(messages);
-  body["temperature"] = static_cast<double>(config.temperature);
-  body["top_p"] = static_cast<double>(config.top_p);
-  if (config.top_k > 0)
-    body["top_k"] = config.top_k;
-  if (config.seed >= 0)
-    body["seed"] = config.seed;
-  return body.dump();
-}
-
-// Tool calls as Gufo's JSON dialect reads them.
-std::string ToolMarkup(std::string_view calls_json) {
-  if (calls_json.empty())
-    return {};
-  std::string markup;
-  try {
-    const auto calls = json::parse(calls_json);
-    for (const auto& call : calls.items()) {
-      const auto* function = call.find("function");
-      if (function == nullptr)
-        continue;
-      json::Value block = json::Value::object();
-      block["name"] = function->member_str("name");
-      const auto arguments = function->member_str("arguments");
-      block["arguments"] = ParseOr(arguments, json::Value(arguments));
-      markup += "<tool_call>\n" + block.dump() + "\n</tool_call>";
-    }
-  } catch (const std::exception& error) {
-    // Loom writes this JSON itself; a parse failure is a bug, not input.
-    std::fprintf(stderr, "loom: dropped unreadable tool calls: %s\n",
-                 error.what());
-  }
-  return markup;
-}
 
 // --------------------------------------------------------------- runner ---
 
 class LoomRunner final : public ext::TextModelRunner {
 public:
-  LoomRunner(std::shared_ptr<LoomModel> model, std::uint32_t max_context)
+  LoomRunner(std::shared_ptr<LoomModel> model, std::uint32_t max_context,
+             bool disk_cache, std::size_t ram_cache_bytes)
       : model_(std::move(model)),
         max_context_(max_context == 0
                          ? model_->info().context_capacity
@@ -681,6 +85,24 @@ public:
         width_(std::max<std::uint32_t>(
             1, std::min<std::uint32_t>(model_->info().max_epoch_spans,
                                        rows_))) {
+    ram_cache_bytes_ = ram_cache_bytes;
+    if (disk_cache) {
+      // A disk tier persists what the RAM tier holds, so entries become
+      // portable checkpoint images instead of named device checkpoints.
+      loom_text_embed_image_layout_t layout{};
+      loom_text_embed_image_layout(model_->embed(), &layout);
+      const auto rows = ImageLayout::RowsPerPage(layout.page_bytes,
+                                                 layout.block_size);
+      if (layout.supported && layout.page_bytes > 0 && rows)
+        images_ = ImageLayout{.block_size = layout.block_size,
+                              .fixed_bytes = layout.fixed_bytes,
+                              .page_bytes = layout.page_bytes,
+                              .rows_per_page = *rows};
+      else
+        std::fprintf(stderr,
+                     "loom: this preset's state cannot be saved as images; "
+                     "the prompt cache stays in device memory\n");
+    }
     close_tokens_ = DiscoverReasoningClose();
     const char* source = close_tokens_.empty() ? "probe" : "template";
     if (close_tokens_.empty())
@@ -726,8 +148,14 @@ public:
     // checkpoint names and its own metadata.
     return {.per_request_state_bytes = 0,
             .temporary_scratch_bytes = 0,
-            .retained_snapshot_capacity_bytes = kHostCacheBytes,
-            .retained_snapshot_ceiling_bytes = kHostCacheBytes};
+            // Image blocks fill ImageCacheBytes; the cache's own metadata,
+            // restore bookkeeping and staging take the rest.
+            .retained_snapshot_capacity_bytes =
+                images_ ? ImageCacheBytes() + kHostCacheBytes * 8
+                        : kHostCacheBytes,
+            .retained_snapshot_ceiling_bytes =
+                images_ ? ImageCacheBytes() + kHostCacheBytes * 8
+                        : kHostCacheBytes};
   }
 
   [[nodiscard]] std::vector<ext::TextExecutionPlan> SupportedPlans()
@@ -934,6 +362,8 @@ public:
                                 std::size_t) const override {
     // One ledger block per retainable checkpoint: when Gufo's cache holds
     // kCheckpoints entries, a new capture makes it evict one first.
+    if (images_)
+      return CreateImageCacheResources(ledger);
     struct Block {
       cache::ResourceCharge pool;
     };
@@ -943,7 +373,8 @@ public:
           {ledger.Reserve(cache::ResourceCategory::kBackingFree, 64).Convert()});
     auto resources = std::make_unique<ext::ComponentCacheResources>();
     resources->owner = blocks;
-    resources->adapter = std::make_unique<LoomAdapter>(model_, rows_);
+    resources->adapter =
+        std::make_unique<LoomAdapter>(model_, rows_, std::nullopt);
     resources->stream = [] { return std::make_unique<NullStream>(); };
     resources->allocate = [blocks, model = model_](
                               const cache::PayloadRequest& request)
@@ -968,6 +399,71 @@ public:
                                                     payload->bytes.data()));
                   },
                   payload.get()};
+        } catch (const std::bad_alloc&) {
+        }
+      }
+      throw cache::ResourceExhausted();
+    };
+    resources->staging = [](std::size_t size) {
+      auto data = std::make_shared<std::vector<std::uint8_t>>(size);
+      return cache::StagingAllocation{data, *data};
+    };
+    return resources;
+  }
+
+  // Image mode: payloads are host bytes charged to Gufo's ledger.
+  std::unique_ptr<ext::ComponentCacheResources> CreateImageCacheResources(
+      cache::ResourceLedger& ledger) const {
+    auto resources = std::make_unique<ext::ComponentCacheResources>();
+    resources->adapter = std::make_unique<LoomAdapter>(model_, rows_, images_);
+    resources->stream = [] { return std::make_unique<NullStream>(); };
+    // The budget is committed up front as ledger blocks (private-state
+    // blocks and page-chunk blocks), as Gufo's cache expects; each capture
+    // claims a free block and allocates its host bytes.
+    struct Block {
+      cache::ResourceCharge pool;
+      std::size_t bytes;
+      bool private_state;
+    };
+    const std::size_t budget = ImageCacheBytes();
+    const std::size_t private_bytes = images_->private_bytes();
+    const std::size_t chunk_bytes = kPagesPerChunk * images_->page_bytes;
+    const std::size_t private_blocks = std::clamp<std::size_t>(
+        budget / 4 / std::max<std::size_t>(private_bytes, 1), 2, kCheckpoints);
+    const std::size_t chunk_blocks =
+        budget > private_blocks * private_bytes
+            ? (budget - private_blocks * private_bytes) / chunk_bytes
+            : 0;
+    auto blocks = std::make_shared<std::vector<Block>>();
+    for (std::size_t i = 0; i < private_blocks + chunk_blocks; ++i) {
+      const bool private_state = i < private_blocks;
+      const std::size_t bytes = private_state ? private_bytes : chunk_bytes;
+      blocks->push_back(
+          {ledger.Reserve(cache::ResourceCategory::kBackingFree, bytes)
+               .Convert(),
+           bytes, private_state});
+    }
+    resources->owner = blocks;
+    resources->allocate = [blocks](const cache::PayloadRequest& request)
+        -> cache::ComponentCaptureBuffer {
+      const bool private_state =
+          request.category == cache::ResourceCategory::kPrivateState;
+      for (auto& block : *blocks) {
+        if (block.private_state != private_state || request.bytes > block.bytes ||
+            block.pool.Info().category != cache::ResourceCategory::kBackingFree)
+          continue;
+        try {
+          auto reservation = std::make_shared<cache::ResourceReservation>(
+              block.pool.ReserveBacking(request.category));
+          auto data = std::make_shared<std::vector<std::byte>>(request.bytes);
+          const std::span<std::byte> bytes(*data);
+          return {bytes,
+                  [reservation, data] {
+                    return cache::Payload::Committed(
+                        reservation->Convert(),
+                        std::shared_ptr<const void>(data, data->data()));
+                  },
+                  data.get()};
         } catch (const std::bad_alloc&) {
         }
       }
@@ -1295,6 +791,7 @@ private:
     loom.slot->position = 0;
     loom.slot->deferred = -1;
     loom.slot->stale = false;
+    ++loom.slot->generation;
     loom.bound.clear();
   }
 
@@ -1649,6 +1146,21 @@ private:
   std::uint32_t width_;
   // Guarded by the model mutex; learned from output when templates hide it.
   mutable std::vector<std::int32_t> close_tokens_;
+  std::size_t ram_cache_bytes_{0};
+  std::optional<ImageLayout> images_;
+
+  // Host bytes the RAM tier may hold as images: --ram-cache, or room for a
+  // few full-context images.
+  [[nodiscard]] std::size_t ImageCacheBytes() const {
+    if (ram_cache_bytes_ > 0)
+      return ram_cache_bytes_;
+    const std::size_t pages =
+        (model_->info().context_capacity + images_->block_size - 1) /
+        images_->block_size;
+    return std::clamp<std::size_t>(
+        4 * (images_->private_bytes() + pages * images_->page_bytes),
+        std::size_t{1} << 30, std::size_t{16} << 30);
+  }
 };
 
 std::shared_ptr<ext::TextModelRunner> CreateLoomRunner(
@@ -1656,7 +1168,10 @@ std::shared_ptr<ext::TextModelRunner> CreateLoomRunner(
   try {
     auto model = std::make_shared<LoomModel>(
         options.model_path, options.provider_options, options.session_count);
-    return std::make_shared<LoomRunner>(std::move(model), options.max_context);
+    return std::make_shared<LoomRunner>(
+        std::move(model), options.max_context,
+        !options.disk_cache.directory.empty(),
+        options.ram_cache.enabled ? options.ram_cache.capacity_bytes : 0);
   } catch (const std::exception& exception) {
     if (error != nullptr)
       *error = exception.what();
@@ -1680,3 +1195,4 @@ void loom_text_provider_register(gufo::ext::Registry& registry) {
 void loom_register(gufo::ext::Registry& registry) {
   (void)registry;
 }
+

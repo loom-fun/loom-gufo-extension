@@ -2,6 +2,7 @@
 
 #include "loom_text_embed.h"
 
+#include <inttypes.h>
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
@@ -23,6 +24,10 @@
 #include "loom/serve/service/text/media_projector.h"
 #include "loom/serve/service/text/chat.h"
 #include "loom/serve/service/text/model.h"
+#include "loom/serve/service/text/model_instance.h"
+#include "loom/serve/runtime/storage/snapshot.h"
+#include "loom/serve/runtime/storage/memory.h"
+#include "loom/serve/runtime/execution/execution.h"
 #include "loom/serve/service/text/schedule.h"
 #include "loom/serve/service/text/tool_calls.h"
 #include "loomc/target/amdgpu/iree_hal.h"
@@ -878,6 +883,278 @@ LOOM_TEXT_EMBED_EXPORT void loom_text_embed_checkpoint_release(
   (void)embed;
   loom_serve_text_checkpoint_release(
       (loom_serve_text_checkpoint_t*)checkpoint);
+}
+
+
+//===----------------------------------------------------------------------===//
+// Checkpoint images: a checkpoint's retained state as portable host bytes.
+//===----------------------------------------------------------------------===//
+
+// Image layout: the fixed part (recurrent state, then carry) and one page per
+// block of block_size tokens, each page holding that block of every cache
+// plane. Loom's own snapshot order is plane-major; ranges below map between.
+typedef struct loom_text_embed_image_plan_t {
+  iree_host_size_t count;
+  // Device ranges in Loom's snapshot order (for this checkpoint's IDs).
+  loom_serve_snapshot_range_t* device;
+  // The same logical ranges at their image offsets (buffer 0 = host image).
+  loom_serve_snapshot_range_t* image;
+} loom_text_embed_image_plan_t;
+
+static loom_serve_text_state_t* loom_text_embed_state(loom_text_embed_t* embed) {
+  return &embed->model->state;
+}
+
+static iree_device_size_t loom_text_embed_recurrent_bytes(
+    loom_serve_text_state_t* state) {
+  return state->recurrent.buffers && state->recurrent.buffers[0]
+             ? iree_hal_buffer_byte_length(state->recurrent.buffers[0])
+             : 0;
+}
+
+LOOM_TEXT_EMBED_EXPORT void loom_text_embed_image_layout(
+    loom_text_embed_t* embed, loom_text_embed_image_layout_t* out_layout) {
+  loom_serve_text_state_t* state = loom_text_embed_state(embed);
+  const loom_serve_text_storage_t* storage = &state->storage;
+  uint64_t page = 0;
+  for (iree_host_size_t r = 0; r < storage->region_count; ++r) {
+    page += (uint64_t)storage->regions[r].blocks.count *
+            storage->regions[r].blocks.block_bytes;
+  }
+  out_layout->block_size = (uint32_t)storage->block_size;
+  out_layout->fixed_bytes =
+      loom_text_embed_recurrent_bytes(state) + storage->carry_stride;
+  out_layout->page_bytes = page;
+  out_layout->supported = state->memory.buffers[1] != NULL;
+}
+
+// recurrent_slot UINT32_MAX plans a suspended checkpoint: only lengths and
+// the image side are meaningful then.
+static iree_status_t loom_text_embed_image_plan(
+    loom_serve_text_state_t* state, iree_host_size_t checkpoint_index,
+    uint32_t recurrent_slot, uint32_t block_count, const uint32_t* blocks,
+    loom_text_embed_image_plan_t* out_plan) {
+  memset(out_plan, 0, sizeof(*out_plan));
+  const loom_serve_text_storage_t* storage = &state->storage;
+  iree_hal_buffer_t* views[5] = {0};
+  if (state->recurrent.buffers && state->recurrent.buffers[0]) {
+    views[TEXT_RECURRENT - TEXT_CONTROL] =
+        state->recurrent.buffers[recurrent_slot == UINT32_MAX ? 0
+                                                              : recurrent_slot];
+  }
+  IREE_RETURN_IF_ERROR(loom_serve_text_storage_plan_snapshot(
+      storage, state->row_count + checkpoint_index, views, true, block_count,
+      blocks, state->host_allocator, &out_plan->count, &out_plan->device));
+  iree_status_t status = iree_allocator_malloc_array(
+      state->host_allocator, out_plan->count, sizeof(*out_plan->image),
+      (void**)&out_plan->image);
+  if (!iree_status_is_ok(status)) {
+    iree_allocator_free(state->host_allocator, out_plan->device);
+    out_plan->device = NULL;
+    return status;
+  }
+  const iree_host_size_t fixed_count =
+      (views[TEXT_RECURRENT - TEXT_CONTROL] ? 1 : 0) +
+      (storage->carry_stride ? 1 : 0);
+  uint64_t fixed = 0, page = 0;
+  for (iree_host_size_t i = 0; i < fixed_count; ++i) {
+    out_plan->image[i] = (loom_serve_snapshot_range_t){
+        0, fixed, out_plan->device[i].length};
+    fixed += out_plan->device[i].length;
+  }
+  for (iree_host_size_t r = 0; r < storage->region_count; ++r) {
+    page += (uint64_t)storage->regions[r].blocks.count *
+            storage->regions[r].blocks.block_bytes;
+  }
+  iree_host_size_t i = fixed_count;
+  uint64_t unit_offset = 0;
+  for (iree_host_size_t r = 0; r < storage->region_count; ++r) {
+    const loom_serve_block_region_t* region = &storage->regions[r].blocks;
+    for (iree_host_size_t plane = 0; plane < region->count; ++plane) {
+      for (uint32_t block = 0; block < block_count; ++block, ++i) {
+        out_plan->image[i] = (loom_serve_snapshot_range_t){
+            0, fixed + block * page + unit_offset, region->block_bytes};
+      }
+      unit_offset += region->block_bytes;
+    }
+  }
+  return iree_ok_status();
+}
+
+static void loom_text_embed_image_plan_free(loom_serve_text_state_t* state,
+                                            loom_text_embed_image_plan_t* plan) {
+  iree_allocator_free(state->host_allocator, plan->device);
+  iree_allocator_free(state->host_allocator, plan->image);
+}
+
+// Moves every range between device state and the image, 64 at a time, then
+// waits for the transfers.
+static iree_status_t loom_text_embed_image_transfer(
+    loom_serve_text_state_t* state, const loom_text_embed_image_plan_t* plan,
+    uint8_t* image, bool upload) {
+  iree_hal_buffer_t* buffers[LOOM_SERVE_TEXT_STORAGE_ALLOCATION_COUNT];
+  for (iree_host_size_t i = 0; i < IREE_ARRAYSIZE(buffers); ++i) {
+    buffers[i] = *loom_serve_text_state_allocation(state, i);
+  }
+  iree_hal_transfer_operation_t operations[64];
+  iree_host_size_t operation_count = 0;
+  uint64_t completion = 0;
+  iree_status_t status = loom_serve_execution_drain(state->execution);
+  for (iree_host_size_t i = 0; i < plan->count && iree_status_is_ok(status);
+       ++i) {
+    const loom_serve_snapshot_range_t* device = &plan->device[i];
+    uint8_t* bytes = image + plan->image[i].offset;
+    operations[operation_count++] =
+        upload ? (iree_hal_transfer_operation_t){
+                     .type = IREE_HAL_TRANSFER_OPERATION_TYPE_UPLOAD,
+                     .upload = {.source = bytes,
+                                .target_buffer = buffers[device->buffer_index],
+                                .target_offset = device->offset,
+                                .length = device->length}}
+               : (iree_hal_transfer_operation_t){
+                     .type = IREE_HAL_TRANSFER_OPERATION_TYPE_DOWNLOAD,
+                     .download = {.source_buffer = buffers[device->buffer_index],
+                                  .source_offset = device->offset,
+                                  .target = bytes,
+                                  .length = device->length}};
+    if (operation_count == IREE_ARRAYSIZE(operations)) {
+      status = loom_serve_execution_transfer(state->execution, operation_count,
+                                             operations, &completion);
+      operation_count = 0;
+    }
+  }
+  if (iree_status_is_ok(status) && operation_count) {
+    status = loom_serve_execution_transfer(state->execution, operation_count,
+                                           operations, &completion);
+  }
+  return iree_status_join(status, loom_serve_execution_drain(state->execution));
+}
+
+static iree_device_size_t loom_text_embed_image_size(
+    const loom_text_embed_image_plan_t* plan) {
+  iree_device_size_t size = 0;
+  for (iree_host_size_t i = 0; i < plan->count; ++i) size += plan->image[i].length;
+  return size;
+}
+
+LOOM_TEXT_EMBED_EXPORT int loom_text_embed_checkpoint_export(
+    loom_text_embed_t* embed, const loom_text_embed_checkpoint_t* handle,
+    uint8_t* image, size_t capacity, size_t* out_size,
+    loom_text_embed_checkpoint_info_t* out_info) {
+  const loom_serve_text_checkpoint_t* checkpoint =
+      (const loom_serve_text_checkpoint_t*)handle;
+  loom_serve_text_state_t* state = loom_text_embed_state(embed);
+  loom_serve_text_state_checkpoint_t* endpoint = checkpoint->state;
+  *out_size = 0;
+  out_info->position = endpoint->position;
+  out_info->source_position = endpoint->source_position;
+  out_info->has_prediction = checkpoint->has_prediction;
+  out_info->token = checkpoint->token;
+  if (endpoint->snapshot || endpoint->recurrent_slot == UINT32_MAX) {
+    EMBED_RETURN(embed, iree_make_status(IREE_STATUS_FAILED_PRECONDITION,
+                                         "checkpoint is not resident"));
+  }
+  loom_text_embed_image_plan_t plan;
+  iree_status_t status = loom_text_embed_image_plan(
+      state, (iree_host_size_t)(endpoint - state->checkpoints.values),
+      endpoint->recurrent_slot, endpoint->block_count, endpoint->blocks, &plan);
+  if (!iree_status_is_ok(status)) EMBED_RETURN(embed, status);
+  const iree_device_size_t size = loom_text_embed_image_size(&plan);
+  *out_size = size;
+  if (size > capacity) {
+    status = iree_make_status(IREE_STATUS_RESOURCE_EXHAUSTED,
+                              "checkpoint image needs %" PRIu64 " bytes",
+                              (uint64_t)size);
+  } else {
+    status = loom_text_embed_image_transfer(state, &plan, image, false);
+  }
+  loom_text_embed_image_plan_free(state, &plan);
+  EMBED_RETURN(embed, status);
+}
+
+LOOM_TEXT_EMBED_EXPORT int loom_text_embed_checkpoint_import(
+    loom_text_embed_t* embed, const loom_text_embed_checkpoint_info_t* info,
+    const uint8_t* image, size_t size,
+    loom_text_embed_checkpoint_t** out_checkpoint) {
+  *out_checkpoint = NULL;
+  loom_serve_text_state_t* state = loom_text_embed_state(embed);
+  if (!state->memory.buffers[1]) {
+    EMBED_RETURN(embed,
+                 iree_make_status(IREE_STATUS_FAILED_PRECONDITION,
+                                  "checkpoint images need elastic pooled state"));
+  }
+  if (info->position == 0 || info->position > state->storage.blocks_per_row *
+                                                  state->storage.block_size) {
+    EMBED_RETURN(embed, iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
+                                         "checkpoint image position %u is out "
+                                         "of range",
+                                         info->position));
+  }
+  const uint32_t needed = (uint32_t)iree_host_size_ceil_div(
+      info->position, state->storage.block_size);
+  if (!state->checkpoints.pool.available || !state->recurrent.pool.available ||
+      needed > state->cache.pool.available) {
+    return 1;
+  }
+  // As Loom resumes a suspended endpoint: fresh IDs, committed backing, then
+  // the image's contents in logical order.
+  uint32_t index = 0;
+  loom_serve_block_pool_acquire(&state->checkpoints.pool, 1, &index);
+  loom_serve_text_state_checkpoint_t* endpoint =
+      &state->checkpoints.values[index];
+  endpoint->position = info->position;
+  endpoint->source_position = info->source_position;
+  loom_serve_block_pool_acquire(&state->cache.pool, needed, endpoint->blocks);
+  endpoint->block_count = needed;
+  loom_serve_block_pool_acquire(&state->recurrent.pool, 1,
+                                &endpoint->recurrent_slot);
+  loom_text_embed_image_plan_t plan;
+  iree_status_t status = loom_text_embed_image_plan(
+      state, index, endpoint->recurrent_slot, needed, endpoint->blocks, &plan);
+  bool admitted = false;
+  if (iree_status_is_ok(status) && loom_text_embed_image_size(&plan) != size) {
+    status = iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
+                              "checkpoint image is %zu bytes, expected %" PRIu64,
+                              size, (uint64_t)loom_text_embed_image_size(&plan));
+  }
+  loom_serve_memory_range_t* commitments = NULL;
+  if (iree_status_is_ok(status)) {
+    status = iree_allocator_malloc_array(state->host_allocator, plan.count + 1,
+                                         sizeof(*commitments),
+                                         (void**)&commitments);
+  }
+  if (iree_status_is_ok(status)) {
+    iree_host_size_t count = 0;
+    for (iree_host_size_t i = 0; i < plan.count; ++i) {
+      loom_serve_virtual_buffer_t* buffer =
+          state->memory.buffers[plan.device[i].buffer_index];
+      if (buffer) {
+        commitments[count++] = (loom_serve_memory_range_t){
+            buffer, plan.device[i].offset, plan.device[i].length};
+      }
+    }
+    status = loom_serve_memory_pool_try_commit(state->memory.pool, count,
+                                               commitments, &admitted);
+  }
+  iree_allocator_free(state->host_allocator, commitments);
+  if (iree_status_is_ok(status) && admitted) {
+    status = loom_text_embed_image_transfer(state, &plan, (uint8_t*)image, true);
+  }
+  if (plan.device) loom_text_embed_image_plan_free(state, &plan);
+  if (!iree_status_is_ok(status) || !admitted) {
+    loom_serve_text_state_checkpoint_release(endpoint);
+    if (!iree_status_is_ok(status)) EMBED_RETURN(embed, status);
+    return 1;
+  }
+  loom_serve_text_checkpoint_t* checkpoint = &embed->model->checkpoints[index];
+  *checkpoint = (loom_serve_text_checkpoint_t){
+      .model = embed->model,
+      .references = 1,
+      .state = endpoint,
+      .has_prediction = info->has_prediction != 0,
+      .token = info->token};
+  *out_checkpoint = (loom_text_embed_checkpoint_t*)checkpoint;
+  return 0;
 }
 
 LOOM_TEXT_EMBED_EXPORT size_t loom_text_embed_request_media(

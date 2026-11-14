@@ -5,11 +5,12 @@ for comparison) through its public APIs. Each takes the server's base URL.
 
 | Script | What it checks |
 |---|---|
-| `conformance.py BASE OUT.json` | 25 Gufo features: endpoints, chat, streaming, reasoning on/off and budgets, tool calls (Chat, Responses, Messages), stop/finish, sampling, raw completions, tokenization, prefix cache (reuse, exact restore, shared prefix), concurrency, cancellation; logits-dependent features are reported as gaps |
+| `conformance.py BASE OUT.json` | 27 Gufo features: endpoints, chat, streaming, reasoning on/off, budgets, token usage and effort, tool calls (Chat, Responses, Messages), stop/finish, sampling, raw completions, tokenization, prefix cache (reuse, exact restore, shared prefix), concurrency, cancellation; logits-dependent features are reported as gaps |
 | `vision_test.py BASE MODEL` | image input (color recognition), image cache identity, Messages image parts |
 | `ref.py BASE MODEL OUT.json` | greedy reference answers and behavior probes, for parity with loom-serve |
 | `parity.py BASE` | tool-call and reasoning behavior, to tell model behavior from integration bugs |
 | `bench.py BASE MODEL OUT.json --doc PATH` | decode, prefill and 4-stream throughput, TTFT |
+| `disk_check.py BASE OUT.json first\|second` | disk tier: run on a server with `--cache-disk`, restart it, run `second`; passes when the restarted server reuses the prompt from disk with the same greedy answer (`disk_test.py` is the request) |
 | `thinkoff.py`, `haikuload.py` | thinking-off handling; greedy variance of loom-serve under load |
 
 Results from 2026-11-14 (Strix Halo, gfx1151, hrx-loom 0.1.0): `results/`.

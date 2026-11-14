@@ -36,7 +36,12 @@ Design and evidence: `DESIGN.md`; validation clients and results: `validation/`.
   session is a Loom row; a Gufo decode batch is one packed Loom epoch; with a
   drafter, decode steps return several verified tokens (Gufo's multi-token
   decode). Row checkpoints back Gufo's prefix cache; images run through the
-  package's projector. The provider claims a package directory
+  package's projector.
+- Prompt cache: by default Gufo's RAM tier names Loom checkpoints, which stay
+  on the device (zero copy). With `--cache-disk DIR` the entries become
+  portable checkpoint images (full KV pages as append rows; recurrent state,
+  carry and the partial page as private state), so Gufo's disk tier persists
+  them and a restarted server restores them exactly. The provider claims a package directory
   (`manifest:loom`); `serve`, `prompt`, `chat` and `bench` all accept it.
 
 Options: `--loom-device URI`, `--loom-memory-bytes N`, `--loom-preset NAME`.
@@ -46,8 +51,5 @@ Options: `--loom-device URI`, `--loom-memory-bytes N`, `--loom-preset NAME`.
 - Needs logits from Loom (not exposed by packages yet): `tool_choice`
   required/named, strict schemas, `response_format` enforcement, logprobs,
   min_p and penalties. Tools and JSON work unconstrained, as in loom-serve.
-- The prompt cache has a RAM tier (Loom row checkpoints) but no disk tier.
-- `usage.reasoning_tokens` reads 0 for packages whose native reasoning markup
-  is not `<think>` (gpt-oss, Muse-Glimmer).
 - Containers need `--security-opt seccomp=unconfined` for Loom's GPU memory
   reservation.

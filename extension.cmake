@@ -4,6 +4,7 @@ gufo_extension_target(
   NAME gufo_loom
   SOURCES
     src/loom_runner.cpp
+    src/loom_chat.cpp
   LINK_LIBRARIES
     gufo_ext_runtime
     PkgConfig::loom-text-embed
