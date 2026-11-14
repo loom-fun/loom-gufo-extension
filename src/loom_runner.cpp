@@ -535,8 +535,8 @@ json::Value ContentParts(const ext::ChatMessage& message) {
 }
 
 // The OpenAI chat body the package's chat program renders.
-std::string ChatBody(const std::string& model,
-                     const ext::ChatRequest& request) {
+std::string ChatBody(const std::string& model, const ext::ChatRequest& request,
+                     bool with_effort = true) {
   json::Value body = json::Value::object();
   body["model"] = model;
   json::Value messages = json::Value::array();
@@ -611,6 +611,13 @@ std::string ChatBody(const std::string& model,
     json::Value kwargs = json::Value::object();
     kwargs["enable_thinking"] = *request.reasoning.enabled;
     body["chat_template_kwargs"] = std::move(kwargs);
+  }
+  if (with_effort && request.reasoning.effort.has_value() &&
+      request.reasoning.enabled.value_or(true)) {
+    static constexpr const char* kEfforts[] = {"minimal", "low",   "medium",
+                                               "high",    "xhigh", "max"};
+    body["reasoning_effort"] =
+        kEfforts[static_cast<std::size_t>(*request.reasoning.effort)];
   }
   return body.dump();
 }
@@ -774,14 +781,23 @@ public:
   // reader travels with it to the state (SetPromptContext).
   [[nodiscard]] std::optional<ext::TextPreparedPrompt> PreparePrompt(
       const ext::ChatRequest& request) const override {
-    const std::string body = ChatBody(model_->info().model_id, request);
+    std::string body = ChatBody(model_->info().model_id, request);
     std::lock_guard lock(model_->mutex());
     std::vector<std::int32_t> tokens(model_->info().context_capacity);
     std::size_t count = 0;
     loom_text_embed_request_t* handle = nullptr;
-    if (loom_text_embed_chat_prepare(model_->embed(), body.data(), body.size(),
-                                     tokens.data(), tokens.size(), &count,
-                                     &handle) != 0)
+    int status = loom_text_embed_chat_prepare(model_->embed(), body.data(),
+                                              body.size(), tokens.data(),
+                                              tokens.size(), &count, &handle);
+    if (status != 0 && request.reasoning.effort.has_value()) {
+      // A package without this effort level: Gufo's other runners ignore
+      // an effort they do not support, so render without it.
+      body = ChatBody(model_->info().model_id, request, false);
+      status = loom_text_embed_chat_prepare(model_->embed(), body.data(),
+                                            body.size(), tokens.data(),
+                                            tokens.size(), &count, &handle);
+    }
+    if (status != 0)
       throw std::invalid_argument(
           std::string("loom: ") + loom_text_embed_error(model_->embed()));
     auto context = std::make_shared<LoomPromptContext>(model_, handle);
