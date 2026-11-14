@@ -52,6 +52,8 @@ typedef struct loom_text_embed_info_t {
   uint32_t draft_depth;
   // Widest packed decode epoch (rows advanced together).
   uint32_t max_epoch_spans;
+  // Most images one request may carry; zero when the package has no vision.
+  uint32_t max_images;
 } loom_text_embed_info_t;
 
 int loom_text_embed_open(const loom_text_embed_options_t* options,
@@ -70,6 +72,21 @@ int loom_text_embed_chat_prepare(loom_text_embed_t* embed, const char* body,
                                  size_t capacity, size_t* out_count,
                                  loom_text_embed_request_t** out_request);
 void loom_text_embed_request_free(loom_text_embed_request_t* request);
+
+// Images of a prepared request (image_url parts in the body). media returns
+// the input ranges [offset, offset + count) that each image's projected
+// features replace, in order, and their number. project runs the package's
+// image component on them; prefill_request then consumes request input
+// [offset, offset + count) on a row, features included, selecting the next
+// token when select is nonzero.
+size_t loom_text_embed_request_media(const loom_text_embed_request_t* request,
+                                     uint32_t* offsets, uint32_t* counts,
+                                     size_t capacity);
+int loom_text_embed_request_project(loom_text_embed_request_t* request);
+int loom_text_embed_row_prefill_request(loom_text_embed_t* embed, uint32_t row,
+                                        loom_text_embed_request_t* request,
+                                        size_t offset, size_t count,
+                                        int select);
 
 // Output of one prepared chat request, read with the package's own chat
 // program, as loom-serve reads it. feed appends generated text and returns

@@ -4,6 +4,7 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <unistd.h>
 
 #include "iree/base/api.h"
 #include "iree/base/internal/path.h"
@@ -14,7 +15,12 @@
 #include "loom/serve/runtime/host/host.h"
 #include "loom/serve/server/configuration.h"
 #include "loom/serve/server/device_configuration.h"
+#include "loom/serve/service/finite/component.h"
 #include "loom/serve/service/kind.h"
+#include "loom/serve/service/text/input.h"
+#include "loom/serve/service/text/media.h"
+#include "loom/serve/service/text/media_input.h"
+#include "loom/serve/service/text/media_projector.h"
 #include "loom/serve/service/text/chat.h"
 #include "loom/serve/service/text/model.h"
 #include "loom/serve/service/text/schedule.h"
@@ -35,6 +41,9 @@ struct loom_text_embed_t {
   // Reserved consumed-position high-water per row; zero when unreserved.
   uint64_t* extents;
   loom_serve_text_model_t* model;
+  // The package's image component and its projector, when it has vision.
+  loom_serve_finite_component_t* image;
+  loom_serve_text_media_projector_t* projector;
   iree_host_size_t shape_count;
   loom_serve_packing_shape_t* shapes;
   iree_host_size_t prefill_capacity;
@@ -50,6 +59,10 @@ struct loom_text_embed_request_t {
   char* body;
   uint64_t serial;
   loom_serve_text_chat_t chat;
+  // Checked input with image spans, and its projected features.
+  loom_serve_text_input_t input;
+  bool has_input;
+  loom_serve_text_media_request_t* media;
   // Generated text so far, and whether a reasoning span is open on output.
   iree_string_builder_t response;
   bool reasoning_open;
@@ -126,6 +139,9 @@ static iree_status_t loom_text_embed_open_devices(
   return status;
 }
 
+// Owner wakes are not needed: image work is driven by polling.
+static void loom_text_embed_wake(void* user_data) { (void)user_data; }
+
 static iree_status_t loom_text_embed_open_model(
     loom_text_embed_t* embed, const loom_text_embed_options_t* options) {
   char path[4096];
@@ -186,6 +202,24 @@ static iree_status_t loom_text_embed_open_model(
       loom_serve_device_group_at(embed->group, 0),
       loom_serve_device_group_pool_at(embed->group, 0), &model_options,
       embed->allocator, &embed->model));
+  if (text->image.contract || text->image.prepare.size) {
+    // The package's image component, as loom-serve registers it; prepared on
+    // the first image request.
+    loom_serve_finite_model_options_t image_options = {
+        .sources = configuration->sources,
+        .asset_directory = text->image.assets,
+        .options = text->image.options,
+        .specialization_cache = text->image.specialization_cache,
+    };
+    image_options.sources.component = text->image.contract;
+    image_options.sources.prepare = text->image.prepare;
+    image_options.sources.control = text->image.control;
+    IREE_RETURN_IF_ERROR(loom_serve_finite_component_allocate(
+        loom_serve_device_group_at(embed->group, 0),
+        loom_serve_device_group_pool_at(embed->group, 0), &image_options,
+        (loom_serve_wake_callback_t){loom_text_embed_wake, NULL},
+        embed->allocator, &embed->image));
+  }
   return loom_serve_text_model_activate(embed->model);
 }
 
@@ -216,6 +250,18 @@ LOOM_TEXT_EMBED_EXPORT int loom_text_embed_open(
 
 LOOM_TEXT_EMBED_EXPORT void loom_text_embed_close(loom_text_embed_t* embed) {
   if (!embed) return;
+  if (embed->projector) {
+    loom_serve_text_media_projector_free(embed->projector);
+  }
+  if (embed->image) {
+    bool retired = false;
+    for (int i = 0; i < 100000 && !retired; ++i) {
+      iree_status_ignore(
+          loom_serve_finite_component_retire(embed->image, &retired));
+      if (!retired) usleep(100);
+    }
+    loom_serve_finite_component_free(embed->image);
+  }
   if (embed->model) {
     iree_status_ignore(loom_serve_text_model_free(embed->model));
   }
@@ -258,6 +304,10 @@ LOOM_TEXT_EMBED_EXPORT void loom_text_embed_info(
   out_info->draft_depth =
       (uint32_t)loom_serve_text_model_draft_depth(embed->model);
   out_info->max_epoch_spans = (uint32_t)loom_text_embed_max_spans(embed);
+  out_info->max_images =
+      embed->image ? (uint32_t)loom_serve_text_model_chat_policy(embed->model)
+                         ->images.maximum_count
+                   : 0;
 }
 
 LOOM_TEXT_EMBED_EXPORT int loom_text_embed_chat_prepare(
@@ -282,8 +332,7 @@ LOOM_TEXT_EMBED_EXPORT int loom_text_embed_chat_prepare(
   status = loom_serve_text_chat_initialize(
       loom_serve_text_model_chat_policy(embed->model), configuration->name,
       iree_make_string_view(request->body, body_size), ++embed->request_serial,
-      loom_serve_text_model_context_capacity(embed->model), embed->allocator,
-      &request->chat);
+      /*default_max_tokens=*/1, embed->allocator, &request->chat);
   if (iree_status_is_ok(status)) {
     loom_serve_text_media_span_t* media = NULL;
     iree_host_size_t media_count = 0;
@@ -296,8 +345,36 @@ LOOM_TEXT_EMBED_EXPORT int loom_text_embed_chat_prepare(
         0, embed->allocator, tokens, &count, &media, &media_count);
     iree_allocator_free(embed->allocator, media);
     if (iree_status_is_ok(status) && media_count) {
-      status = iree_make_status(IREE_STATUS_UNIMPLEMENTED,
-                                "image input is not supported here");
+      if (!embed->image) {
+        status = iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
+                                  "this package does not accept images");
+      } else {
+        // Image requests keep the checked input with its media spans.
+        int32_t* scratch = NULL;
+        const iree_host_size_t capacity =
+            loom_serve_text_model_context_capacity(embed->model);
+        status = iree_allocator_malloc(embed->allocator,
+                                       capacity * sizeof(int32_t),
+                                       (void**)&scratch);
+        if (iree_status_is_ok(status)) {
+          status = loom_serve_text_input_prepare(
+              &request->chat, (loom_serve_text_input_prefix_t){0}, false,
+              capacity, scratch, &request->input, embed->allocator);
+        }
+        iree_allocator_free(embed->allocator, scratch);
+        if (iree_status_is_ok(status)) {
+          request->has_input = true;
+          count = request->input.count;
+          if (tokens) {
+            if (count > capacity) {
+              status = iree_make_status(IREE_STATUS_OUT_OF_RANGE,
+                                        "prompt exceeds the token buffer");
+            } else {
+              memcpy(tokens, request->input.tokens, count * sizeof(int32_t));
+            }
+          }
+        }
+      }
     }
     *out_count = count;
     if (!iree_status_is_ok(status)) {
@@ -319,6 +396,23 @@ LOOM_TEXT_EMBED_EXPORT int loom_text_embed_chat_prepare(
 LOOM_TEXT_EMBED_EXPORT void loom_text_embed_request_free(
     loom_text_embed_request_t* request) {
   if (!request) return;
+  if (request->media) {
+    if (request->embed->projector) {
+      while (!loom_serve_text_media_projector_cancel(request->embed->projector,
+                                                     request->media)) {
+        bool progress = false;
+        iree_status_ignore(loom_serve_text_media_projector_advance(
+            request->embed->projector, 0, &progress));
+        usleep(100);
+      }
+    }
+    iree_status_ignore(loom_serve_text_media_request_take_status(request->media));
+    loom_serve_text_media_request_free(request->media);
+  }
+  if (request->has_input) {
+    loom_serve_text_input_deinitialize(&request->input,
+                                       request->embed->allocator);
+  }
   iree_string_builder_deinitialize(&request->response);
   loom_serve_text_chat_deinitialize(&request->chat);
   iree_allocator_free(request->embed->allocator, request);
@@ -751,4 +845,105 @@ LOOM_TEXT_EMBED_EXPORT void loom_text_embed_checkpoint_release(
   (void)embed;
   loom_serve_text_checkpoint_release(
       (loom_serve_text_checkpoint_t*)checkpoint);
+}
+
+LOOM_TEXT_EMBED_EXPORT size_t loom_text_embed_request_media(
+    const loom_text_embed_request_t* request, uint32_t* offsets,
+    uint32_t* counts, size_t capacity) {
+  if (!request->has_input) return 0;
+  const iree_host_size_t count = request->input.media_span_count;
+  for (iree_host_size_t i = 0; i < count && i < capacity; ++i) {
+    offsets[i] = request->input.media_spans[i].input_offset;
+    counts[i] = request->input.media_spans[i].input_count;
+  }
+  return count;
+}
+
+LOOM_TEXT_EMBED_EXPORT int loom_text_embed_request_project(
+    loom_text_embed_request_t* request) {
+  loom_text_embed_t* embed = request->embed;
+  if (!request->has_input || request->media) return 0;
+  // Prepare the image component on first use.
+  loom_serve_finite_model_t* image_model = NULL;
+  iree_status_t status = iree_ok_status();
+  for (;;) {
+    status = loom_serve_finite_component_prepare(embed->image, &image_model);
+    if (!iree_status_is_ok(status) || image_model) break;
+    loom_serve_finite_component_advance(embed->image, false);
+    usleep(200);
+  }
+  if (iree_status_is_ok(status) && !embed->projector) {
+    loom_serve_host_t* host = loom_serve_device_host(
+        loom_serve_text_model_device(embed->model));
+    iree_async_proactor_t* proactor = NULL;
+    status = iree_async_proactor_pool_get(loom_serve_host_proactor_pool(host),
+                                          0, &proactor);
+    if (iree_status_is_ok(status)) {
+      const iree_host_size_t capacity =
+          embed->rows *
+          loom_serve_text_model_chat_policy(embed->model)->images.maximum_count;
+      status = loom_serve_text_media_projector_allocate(
+          image_model, capacity ? capacity : 1, loom_serve_host_executor(host),
+          proactor, (loom_serve_wake_callback_t){loom_text_embed_wake, NULL},
+          embed->allocator, &embed->projector);
+    }
+  }
+  if (iree_status_is_ok(status)) {
+    status = loom_serve_text_media_request_allocate(
+        &request->chat, embed->allocator, &request->media);
+  }
+  // Offer, seal and advance the projection window until every image of the
+  // request has published its features.
+  bool offered = false;
+  while (iree_status_is_ok(status)) {
+    status = loom_serve_text_media_request_take_status(request->media);
+    if (!iree_status_is_ok(status)) break;
+    if (loom_serve_text_media_request_bind(request->media, &request->input, 0))
+      break;
+    if (!offered) {
+      offered = loom_serve_text_media_projector_offer(embed->projector,
+                                                      request->media, 0);
+      loom_serve_text_media_projector_start(embed->projector);
+    }
+    bool progress = false;
+    status = loom_serve_text_media_projector_advance(embed->projector, 0,
+                                                     &progress);
+    loom_serve_finite_component_advance(embed->image, false);
+    if (!progress) usleep(100);
+  }
+  if (iree_status_is_ok(status)) {
+    loom_serve_text_media_request_begin(request->media);
+  }
+  EMBED_RETURN(embed, status);
+}
+
+LOOM_TEXT_EMBED_EXPORT int loom_text_embed_row_prefill_request(
+    loom_text_embed_t* embed, uint32_t row, loom_text_embed_request_t* request,
+    size_t offset, size_t count, int select) {
+  if (!request->has_input || offset + count > request->input.count) {
+    EMBED_RETURN(embed, iree_make_status(IREE_STATUS_OUT_OF_RANGE,
+                                         "request input range"));
+  }
+  iree_host_size_t shape = 0;
+  if (!loom_text_embed_shape(embed, 1, count, &shape)) {
+    EMBED_RETURN(embed, iree_make_status(IREE_STATUS_OUT_OF_RANGE,
+                                         "no shape for %zu input tokens",
+                                         count));
+  }
+  const loom_serve_text_span_t span = {
+      .row_index = row,
+      .token_count = count,
+      .token_ids = request->input.tokens + offset,
+      .flags = select ? LOOM_SERVE_TEXT_SPAN_FLAG_SELECT : 0,
+      .input_offset = offset,
+      .media = request->media
+                   ? loom_serve_text_media_request_input(request->media)
+                   : NULL,
+  };
+  iree_status_t status =
+      loom_serve_text_model_epoch(embed->model, shape, 1, &span);
+  if (iree_status_is_ok(status) && request->media) {
+    loom_serve_text_media_request_consume(request->media, offset + count);
+  }
+  EMBED_RETURN(embed, status);
 }

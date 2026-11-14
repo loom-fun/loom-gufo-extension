@@ -17,6 +17,9 @@ target_link_libraries(loom_text_embed PRIVATE
   loom::serve::service::text::chat
   loom::serve::service::text::model
   loom::serve::service::text::schedule
+  loom::serve::service::text::input
+  loom::serve::service::text::media_projector
+  loom::serve::service::finite::component
   loom::binding::c::target::configured
   loom::binding::c::target::amdgpu::iree_hal
 )

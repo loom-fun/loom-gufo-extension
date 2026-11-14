@@ -45,6 +45,7 @@
 #include <gufo/ext/generated/loom_constants.hpp>
 #include <gufo/ext/json.hpp>
 #include <gufo/ext/registry.hpp>
+#include <gufo/ext/sha256.hpp>
 #include <gufo/ext/text.hpp>
 
 namespace gufo::loom {
@@ -191,6 +192,13 @@ public:
   }
   std::shared_ptr<LoomModel> model;
   loom_text_embed_request_t* request;
+  // Input ranges replaced by projected image features; images are projected
+  // on the first prefill that needs them.
+  std::vector<std::pair<std::size_t, std::size_t>> images;
+  mutable bool projected{false};
+  // Reasoning tokens allowed before the runner closes reasoning.
+  std::optional<std::size_t> reasoning_budget;
+  [[nodiscard]] bool has_images() const { return !images.empty(); }
 };
 
 // ---------------------------------------------------------------- cache ---
@@ -427,6 +435,10 @@ public:
   bool produced{false};
   bool unconstrained{false};
   bool flushed{false};
+  // Whether the streamed output is inside reasoning, and its token count.
+  bool reasoning{false};
+  std::size_t reasoning_tokens{0};
+  bool budget_closed{false};
 };
 
 LoomState& Require(ext::TextRunnerState& state) {
@@ -461,6 +473,61 @@ json::Value ParseOr(const std::string& text, json::Value fallback) {
   }
 }
 
+std::string Base64(std::span<const std::uint8_t> bytes) {
+  static constexpr char kAlphabet[] =
+      "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  std::string out;
+  out.reserve((bytes.size() + 2) / 3 * 4);
+  for (std::size_t i = 0; i < bytes.size(); i += 3) {
+    const std::uint32_t n = (bytes[i] << 16) |
+                            (i + 1 < bytes.size() ? bytes[i + 1] << 8 : 0) |
+                            (i + 2 < bytes.size() ? bytes[i + 2] : 0);
+    out += kAlphabet[(n >> 18) & 63];
+    out += kAlphabet[(n >> 12) & 63];
+    out += i + 1 < bytes.size() ? kAlphabet[(n >> 6) & 63] : '=';
+    out += i + 2 < bytes.size() ? kAlphabet[n & 63] : '=';
+  }
+  return out;
+}
+
+std::string_view MediaType(std::span<const std::uint8_t> bytes) {
+  if (bytes.size() >= 8 && bytes[0] == 0x89 && bytes[1] == 'P')
+    return "image/png";
+  if (bytes.size() >= 12 && bytes[0] == 'R' && bytes[8] == 'W')
+    return "image/webp";
+  return "image/jpeg";
+}
+
+// Text and images in order, as OpenAI content parts with data URLs.
+json::Value ContentParts(const ext::ChatMessage& message) {
+  json::Value parts = json::Value::array();
+  std::size_t at = 0;
+  const auto text = [&](std::size_t end) {
+    if (end > at) {
+      json::Value part = json::Value::object();
+      part["type"] = "text";
+      part["text"] = message.content.substr(at, end - at);
+      parts.push_back(std::move(part));
+    }
+    at = end;
+  };
+  for (const auto& image : message.images) {
+    text(std::min(image.offset, message.content.size()));
+    const std::span<const std::uint8_t> bytes(*image.bytes);
+    json::Value url = json::Value::object();
+    url["url"] = "data:" + std::string(MediaType(bytes)) + ";base64," +
+                 Base64(bytes);
+    if (image.detail == ext::ChatMessage::ImageDetail::kLow)
+      url["detail"] = "low";
+    json::Value part = json::Value::object();
+    part["type"] = "image_url";
+    part["image_url"] = std::move(url);
+    parts.push_back(std::move(part));
+  }
+  text(message.content.size());
+  return parts;
+}
+
 // The OpenAI chat body the package's chat program renders.
 std::string ChatBody(const std::string& model,
                      const ext::ChatRequest& request) {
@@ -468,11 +535,10 @@ std::string ChatBody(const std::string& model,
   body["model"] = model;
   json::Value messages = json::Value::array();
   for (const auto& message : request.messages) {
-    if (!message.images.empty())
-      throw std::invalid_argument("this Loom package does not accept images");
     json::Value out = json::Value::object();
     out["role"] = RoleName(message.role);
-    out["content"] = message.content;
+    out["content"] = message.images.empty() ? json::Value(message.content)
+                                             : ContentParts(message);
     if (message.role == ext::ChatRole::kAssistant) {
       if (!message.thought.empty())
         out["reasoning_content"] = message.thought;
@@ -594,7 +660,9 @@ public:
         rows_(std::max<std::uint32_t>(model_->info().rows, 1)),
         width_(std::max<std::uint32_t>(
             1, std::min<std::uint32_t>(model_->info().max_epoch_spans,
-                                       rows_))) {}
+                                       rows_))) {
+    close_tokens_ = DiscoverReasoningClose();
+  }
 
   [[nodiscard]] ext::TextRunnerDescriptor Descriptor() const override {
     return {
@@ -603,6 +671,7 @@ public:
         .max_context = model_->info().context_capacity,
         .capabilities =
             {
+                .supports_vision = model_->info().max_images > 0,
                 .incremental_prefill = true,
                 .final_token_advance_required = false,
                 .incremental_text_is_exact = true,
@@ -694,6 +763,34 @@ public:
       throw std::invalid_argument(
           std::string("loom: ") + loom_text_embed_error(model_->embed()));
     auto context = std::make_shared<LoomPromptContext>(model_, handle);
+    if (request.reasoning.budget_tokens && !close_tokens_.empty())
+      context->reasoning_budget = request.reasoning.budget_tokens;
+    if (const std::size_t media = loom_text_embed_request_media(handle, nullptr,
+                                                                nullptr, 0)) {
+      std::vector<std::uint32_t> offsets(media), counts(media);
+      loom_text_embed_request_media(handle, offsets.data(), counts.data(),
+                                    media);
+      // Image rows are placeholders in token space: each prefix carries the
+      // identity of the images before it, so cached state never crosses
+      // different images.
+      std::vector<std::uint8_t> identity;
+      std::size_t index = 0;
+      for (const auto& message : request.messages) {
+        for (const auto& image : message.images) {
+          if (index < media) {
+            context->cache_prefixes.push_back(
+                {.token_count = offsets[index], .identity = identity});
+            context->images.emplace_back(offsets[index], counts[index]);
+          }
+          crypto::Sha256Hasher hasher;
+          hasher.Update(std::span<const std::uint8_t>(*image.bytes));
+          const auto digest = hasher.Finish();
+          identity.insert(identity.end(), digest.begin(), digest.end());
+          ++index;
+        }
+      }
+      context->cache_identity = identity;
+    }
     // The next turn renders this conversation plus the answer and a new user
     // message. Where that rendering departs from this prompt, the assistant
     // framing begins: Gufo checkpoints before it so the next turn reuses all
@@ -742,31 +839,41 @@ public:
     loom.produced = false;
     loom.unconstrained = false;
     loom.flushed = false;
+    loom.reasoning = false;
+    loom.reasoning_tokens = 0;
+    loom.budget_closed = false;
     model_->Check(loom_text_embed_decoder_reset(loom.decoder), "decoder");
   }
 
-  // The package's chat program may open reasoning in the prompt; Gufo's
-  // reasoning budget then counts from the prompt's opener.
+  // Reasoning budgets are enforced here, with the package's own close marker
+  // (any tokenizer); Gufo's token-tag budget is not used.
+  [[nodiscard]] ReasoningTags ReasoningBudgetTags() const override {
+    return {"", "", {}};
+  }
+  // Where the package's chat program leaves the prompt; usage accounting
+  // counts reasoning from a prompt-opened reasoning block.
   [[nodiscard]] ext::InitialOutputState InitialOutputState(
       const ext::ChatRequest& request) const override {
     const auto prepared = PreparePrompt(request);
     if (!prepared || prepared->tokens.empty())
       return ext::InitialOutputState::kAuto;
     const auto& tokens = prepared->tokens;
-    const std::size_t tail = std::min<std::size_t>(tokens.size(), 4);
-    std::string text = Decode(std::span(tokens).last(tail));
+    std::string text =
+        Decode(std::span(tokens).last(std::min<std::size_t>(tokens.size(), 4)));
     while (!text.empty() &&
            std::isspace(static_cast<unsigned char>(text.back())))
       text.pop_back();
-    const auto tags = ReasoningBudgetTags();
-    const auto ends_with = [&](std::string_view suffix) {
-      return !suffix.empty() && text.size() >= suffix.size() &&
-             text.compare(text.size() - suffix.size(), suffix.size(),
-                          suffix) == 0;
-    };
-    if (ends_with(tags.start))
-      return ext::InitialOutputState::kThought;
-    return ext::InitialOutputState::kAuto;
+    static constexpr std::string_view kOpen = "<think>";
+    return text.size() >= kOpen.size() &&
+                   text.compare(text.size() - kOpen.size(), kOpen.size(),
+                                kOpen) == 0
+               ? ext::InitialOutputState::kThought
+               : ext::InitialOutputState::kAuto;
+  }
+
+  // The canonical markup the output reader streams, for every package.
+  [[nodiscard]] ReasoningMarkup ReasoningDelimiters() const override {
+    return {"<think>", "</think>"};
   }
 
   [[nodiscard]] std::string Decode(
@@ -869,12 +976,50 @@ public:
                                                   extent, 1),
                         "reserve", 1) != 0)
         throw cache::ResourceExhausted();
+    } else if (const std::uint64_t actual =
+                   loom_text_embed_row_position(embed, loom.row()) +
+                   (loom.slot->deferred >= 0 ? 1 : 0);
+               actual != offset) {
+      // The row cannot be rewound: its state must end exactly where Gufo
+      // continues the prompt.
+      throw std::logic_error("loom row holds " + std::to_string(actual) +
+                             " tokens, continued at " + std::to_string(offset));
     } else if (loom_text_embed_row_extent(embed, loom.row()) < extent) {
       if (model_->Check(
               loom_text_embed_row_extend(embed, loom.row(), extent), "reserve",
               1) != 0)
         throw cache::ResourceExhausted();
       loom.bound.clear();
+    }
+    if (loom.context != nullptr && loom.context->has_images()) {
+      // Image prompts run through the request's checked input, whose rows
+      // at image positions are projected features.
+      if (!loom.context->projected) {
+        model_->Check(loom_text_embed_request_project(loom.context->request),
+                      "project images");
+        loom.context->projected = true;
+      }
+      if (loom.slot->deferred >= 0) {
+        const std::int32_t token =
+            static_cast<std::int32_t>(loom.slot->deferred);
+        model_->Check(loom_text_embed_row_prefill(embed, loom.row(), &token, 1),
+                      "prefill");
+      }
+      const std::size_t now = count - (last ? 1 : 0);
+      const std::size_t step = std::max<std::size_t>(
+          model_->info().prefill_capacity, 1);
+      for (std::size_t done = 0; done < now;) {
+        const std::size_t chunk = std::min(step, now - done);
+        model_->Check(loom_text_embed_row_prefill_request(
+                          embed, loom.row(), loom.context->request,
+                          offset + done, chunk, 0),
+                      "prefill");
+        done += chunk;
+      }
+      loom.slot->deferred =
+          last ? static_cast<std::int64_t>(prompt.back()) : -1;
+      loom.slot->position += count;
+      return {.consumed_tokens = count, .decode_ready = last};
     }
     // A deferred token from the last prefill (or a restored checkpoint)
     // enters state first; this prompt's final token waits for its sampler.
@@ -983,6 +1128,8 @@ public:
         auto& sampler = decodes[i].sampler.get();
         Unconstrain(loom, sampler);
         PrepareLocked(loom, sampler.config());
+        if (CloseReasoningLocked(loom, steps[i], remaining))
+          continue;
         if (const auto forced = sampler.ForcedToken()) {
           // Gufo's reasoning budget forces this token in place of the
           // row's own selection.
@@ -1183,6 +1330,14 @@ private:
     loom.piece_key = key;
     loom.piece = OutputLocked(loom, raw, false);
     loom.produced = true;
+    // Track reasoning from the canonical markers the output reader emits.
+    const auto open = loom.piece.rfind("<think>");
+    const auto close = loom.piece.rfind("</think>");
+    if (open != std::string::npos || close != std::string::npos)
+      loom.reasoning = open != std::string::npos &&
+                       (close == std::string::npos || open > close);
+    if (loom.reasoning)
+      ++loom.reasoning_tokens;
     return loom.piece;
   }
 
@@ -1244,9 +1399,77 @@ private:
     loom.bound.clear();
   }
 
+  // The package's reasoning close marker: render an earlier turn with known
+  // reasoning and answer, and read what the chat program puts between them.
+  std::vector<std::int32_t> DiscoverReasoningClose() const {
+    static constexpr std::string_view kThought = "Q7reasoning9";
+    static constexpr std::string_view kAnswer = "Q7answer9";
+    for (const bool trailing_user : {false, true}) {
+      ext::ChatRequest request;
+      request.messages.emplace_back(ext::ChatRole::kUser, "Hi.");
+      request.messages.emplace_back(ext::ChatRole::kAssistant,
+                                    std::string(kAnswer), std::string(),
+                                    std::string(kThought));
+      if (trailing_user)
+        request.messages.emplace_back(ext::ChatRole::kUser, "Thanks.");
+      request.reasoning.enabled = true;
+      try {
+        const auto body = ChatBody(model_->info().model_id, request);
+        std::lock_guard lock(model_->mutex());
+        std::vector<std::int32_t> tokens(model_->info().context_capacity);
+        std::size_t count = 0;
+        if (loom_text_embed_chat_prepare(model_->embed(), body.data(),
+                                         body.size(), tokens.data(),
+                                         tokens.size(), &count, nullptr) != 0)
+          continue;
+        tokens.resize(count);
+        const std::string text = DecodeLocked(tokens);
+        const auto thought = text.find(kThought);
+        const auto answer = text.find(kAnswer);
+        if (thought == std::string::npos || answer == std::string::npos ||
+            answer <= thought + kThought.size())
+          continue;
+        const std::string close = text.substr(
+            thought + kThought.size(), answer - thought - kThought.size());
+        std::vector<std::int32_t> close_tokens(close.size() + 16);
+        std::size_t close_count = 0;
+        if (close.find_first_not_of(" \t\r\n") == std::string::npos ||
+            loom_text_embed_tokenize(model_->embed(), close.data(),
+                                     close.size(), 1, close_tokens.data(),
+                                     close_tokens.size(), &close_count) != 0)
+          continue;
+        close_tokens.resize(close_count);
+        return close_tokens;
+      } catch (const std::exception&) {
+      }
+    }
+    return {};
+  }
+
+  // Forces the reasoning close once the request's budget is spent.
+  bool CloseReasoningLocked(LoomState& loom, ext::TextDecodeStep& step,
+                            std::size_t remaining) const {
+    if (loom.context == nullptr || !loom.context->reasoning_budget ||
+        loom.budget_closed || !loom.reasoning ||
+        loom.reasoning_tokens < *loom.context->reasoning_budget)
+      return false;
+    loom.budget_closed = true;
+    for (const auto token : close_tokens_) {
+      if (step.selections.size() >= remaining)
+        break;
+      const auto forced = static_cast<TextRunnerToken>(token);
+      step.selections.push_back(
+          {.token = forced, .piece = PieceLocked(loom, forced)});
+      AdvanceLocked(loom, forced);
+    }
+    FinishLocked(loom, step, remaining);
+    return true;
+  }
+
   std::shared_ptr<LoomModel> model_;
   std::uint32_t rows_;
   std::uint32_t width_;
+  std::vector<std::int32_t> close_tokens_;
 };
 
 std::shared_ptr<ext::TextModelRunner> CreateLoomRunner(

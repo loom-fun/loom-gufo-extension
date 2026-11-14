@@ -26,7 +26,10 @@
       "name": "--loom-device",
       "type": "string",
       "commands": [
-        "serve"
+        "serve",
+        "prompt",
+        "chat",
+        "bench"
       ],
       "providers": [
         "loom-text"
@@ -37,7 +40,10 @@
       "name": "--loom-memory-bytes",
       "type": "integer",
       "commands": [
-        "serve"
+        "serve",
+        "prompt",
+        "chat",
+        "bench"
       ],
       "providers": [
         "loom-text"
@@ -48,7 +54,10 @@
       "name": "--loom-preset",
       "type": "string",
       "commands": [
-        "serve"
+        "serve",
+        "prompt",
+        "chat",
+        "bench"
       ],
       "providers": [
         "loom-text"
