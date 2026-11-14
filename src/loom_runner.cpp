@@ -655,8 +655,12 @@ std::string ToolMarkup(std::string_view calls_json) {
 
 class LoomRunner final : public ext::TextModelRunner {
 public:
-  explicit LoomRunner(std::shared_ptr<LoomModel> model)
+  LoomRunner(std::shared_ptr<LoomModel> model, std::uint32_t max_context)
       : model_(std::move(model)),
+        max_context_(max_context == 0
+                         ? model_->info().context_capacity
+                         : std::min(max_context,
+                                    model_->info().context_capacity)),
         rows_(std::max<std::uint32_t>(model_->info().rows, 1)),
         width_(std::max<std::uint32_t>(
             1, std::min<std::uint32_t>(model_->info().max_epoch_spans,
@@ -668,7 +672,7 @@ public:
     return {
         .model_id = model_->info().model_id,
         .state_abi = "loom-text-2",
-        .max_context = model_->info().context_capacity,
+        .max_context = max_context_,
         .capabilities =
             {
                 .supports_vision = model_->info().max_images > 0,
@@ -1443,6 +1447,44 @@ private:
       } catch (const std::exception&) {
       }
     }
+    // Templates that drop earlier reasoning: compare the generation prompt
+    // with thinking on (it ends open) and off (it adds the close).
+    try {
+      std::string rendered[2];
+      for (int on = 0; on < 2; ++on) {
+        ext::ChatRequest request;
+        request.messages.emplace_back(ext::ChatRole::kUser, "Hi.");
+        request.reasoning.enabled = on == 1;
+        const auto body = ChatBody(model_->info().model_id, request);
+        std::lock_guard lock(model_->mutex());
+        std::vector<std::int32_t> tokens(model_->info().context_capacity);
+        std::size_t count = 0;
+        if (loom_text_embed_chat_prepare(model_->embed(), body.data(),
+                                         body.size(), tokens.data(),
+                                         tokens.size(), &count, nullptr) != 0)
+          return {};
+        tokens.resize(count);
+        rendered[on] = DecodeLocked(tokens);
+      }
+      const std::string& off = rendered[0];
+      const std::string& on = rendered[1];
+      if (on.size() >= off.size() || off.compare(0, on.size(), on) != 0)
+        return {};
+      const std::string close = off.substr(on.size());
+      if (close.find("</") == std::string::npos &&
+          close.find("<|") == std::string::npos)
+        return {};
+      std::lock_guard lock(model_->mutex());
+      std::vector<std::int32_t> close_tokens(close.size() + 16);
+      std::size_t close_count = 0;
+      if (loom_text_embed_tokenize(model_->embed(), close.data(), close.size(),
+                                   1, close_tokens.data(), close_tokens.size(),
+                                   &close_count) != 0)
+        return {};
+      close_tokens.resize(close_count);
+      return close_tokens;
+    } catch (const std::exception&) {
+    }
     return {};
   }
 
@@ -1467,6 +1509,8 @@ private:
   }
 
   std::shared_ptr<LoomModel> model_;
+  // --context, at most the package's own context.
+  std::uint32_t max_context_;
   std::uint32_t rows_;
   std::uint32_t width_;
   std::vector<std::int32_t> close_tokens_;
@@ -1477,7 +1521,7 @@ std::shared_ptr<ext::TextModelRunner> CreateLoomRunner(
   try {
     auto model = std::make_shared<LoomModel>(
         options.model_path, options.provider_options, options.session_count);
-    return std::make_shared<LoomRunner>(std::move(model));
+    return std::make_shared<LoomRunner>(std::move(model), options.max_context);
   } catch (const std::exception& exception) {
     if (error != nullptr)
       *error = exception.what();
