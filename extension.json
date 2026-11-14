@@ -23,38 +23,42 @@
   ],
   "options": [
     {
-      "name": "--loom-serve",
-      "type": "path",
-      "commands": ["serve"],
-      "providers": ["loom-text"],
-      "help": "loom-serve executable (default: $LOOM_SERVE, else loom-serve on PATH)"
-    },
-    {
       "name": "--loom-device",
       "type": "string",
-      "commands": ["serve"],
-      "providers": ["loom-text"],
+      "commands": [
+        "serve"
+      ],
+      "providers": [
+        "loom-text"
+      ],
       "help": "Loom device URI (default: amdgpu://?completion_spin_ns=4294967295)"
     },
     {
       "name": "--loom-memory-bytes",
       "type": "integer",
-      "commands": ["serve"],
-      "providers": ["loom-text"],
-      "help": "Device memory Loom may use for weights and state (default: 32 GiB)"
+      "commands": [
+        "serve"
+      ],
+      "providers": [
+        "loom-text"
+      ],
+      "help": "Device memory Loom may use for weights and state (default: no limit)"
     },
     {
       "name": "--loom-preset",
       "type": "string",
-      "commands": ["serve"],
-      "providers": ["loom-text"],
+      "commands": [
+        "serve"
+      ],
+      "providers": [
+        "loom-text"
+      ],
       "help": "Preset of the Loom package to serve (default: the package's own)"
     }
   ],
   "packages": [
     {
-      "pkg_config": "libcurl",
-      "nix": "curl"
+      "pkg_config": "loom-text-embed"
     }
   ],
   "targets": {
