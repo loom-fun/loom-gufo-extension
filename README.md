@@ -21,18 +21,19 @@ gufo serve llm --model models/qwen3-4b --sessions 4
 - `src/loom_runner.cpp` is the Gufo side: a `TextModelRunner`. Each Gufo
   session is a Loom row; a Gufo decode batch is one packed Loom epoch; with a
   drafter, decode steps return several verified tokens (Gufo's multi-token
-  decode). The provider claims a package directory (`manifest:loom`).
+  decode). Row checkpoints back Gufo's prefix cache; images run through the
+  package's projector. The provider claims a package directory
+  (`manifest:loom`); `serve`, `prompt`, `chat` and `bench` all accept it.
 
 Options: `--loom-device URI`, `--loom-memory-bytes N`, `--loom-preset NAME`.
 
-## Prototype limits
+## Limits
 
-- No prefix reuse between requests: Loom row state stays on device, and the
-  cache adapter declares no continuation (every request prefills).
-- Sampling runs on device with the package's sampler (temperature, top-k,
-  top-p, seed). Gufo's grammar constraints are released, so tool calls and
-  JSON are unconstrained (as in loom-serve) and parsed by Gufo; logprobs are
-  unavailable. Both need the package to expose logits.
-- `serve` only; `gufo prompt`, `chat` and `bench` still expect a GGUF.
+- Needs logits from Loom (not exposed by packages yet): `tool_choice`
+  required/named, strict schemas, `response_format` enforcement, logprobs,
+  min_p and penalties. Tools and JSON work unconstrained, as in loom-serve.
+- The prompt cache has a RAM tier (Loom row checkpoints) but no disk tier.
+- `usage.reasoning_tokens` reads 0 for packages whose native reasoning markup
+  is not `<think>` (gpt-oss, Muse-Glimmer).
 - Containers need `--security-opt seccomp=unconfined` for Loom's GPU memory
   reservation.

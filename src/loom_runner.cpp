@@ -21,6 +21,8 @@
 // top-p, seed); Gufo's grammar constraints, logprobs, min-p and penalties
 // need logits, which Loom packages do not expose.
 
+#include <cstdlib>
+#include <cstdio>
 #include <loom_text_embed.h>
 
 #include <algorithm>
@@ -198,6 +200,8 @@ public:
   mutable bool projected{false};
   // Reasoning tokens allowed before the runner closes reasoning.
   std::optional<std::size_t> reasoning_budget;
+  // The prompt ends inside an open reasoning block.
+  bool opens_reasoning{false};
   [[nodiscard]] bool has_images() const { return !images.empty(); }
 };
 
@@ -439,6 +443,8 @@ public:
   bool reasoning{false};
   std::size_t reasoning_tokens{0};
   bool budget_closed{false};
+  // Whether any canonical output text was streamed yet.
+  bool emitted{false};
 };
 
 LoomState& Require(ext::TextRunnerState& state) {
@@ -646,7 +652,10 @@ std::string ToolMarkup(std::string_view calls_json) {
       block["arguments"] = ParseOr(arguments, json::Value(arguments));
       markup += "<tool_call>\n" + block.dump() + "\n</tool_call>";
     }
-  } catch (const std::exception&) {
+  } catch (const std::exception& error) {
+    // Loom writes this JSON itself; a parse failure is a bug, not input.
+    std::fprintf(stderr, "loom: dropped unreadable tool calls: %s\n",
+                 error.what());
   }
   return markup;
 }
@@ -666,8 +675,15 @@ public:
             1, std::min<std::uint32_t>(model_->info().max_epoch_spans,
                                        rows_))) {
     close_tokens_ = DiscoverReasoningClose();
+    const char* source = close_tokens_.empty() ? "probe" : "template";
     if (close_tokens_.empty())
       ProbeReasoningClose();
+    std::lock_guard lock(model_->mutex());
+    std::fprintf(stderr, "loom: reasoning close %s (%s)\n",
+                 close_tokens_.empty()
+                     ? "unknown; reasoning budgets are not enforced"
+                     : ("'" + DecodeLocked(close_tokens_) + "'").c_str(),
+                 source);
   }
 
   [[nodiscard]] ext::TextRunnerDescriptor Descriptor() const override {
@@ -769,6 +785,8 @@ public:
       throw std::invalid_argument(
           std::string("loom: ") + loom_text_embed_error(model_->embed()));
     auto context = std::make_shared<LoomPromptContext>(model_, handle);
+    tokens.resize(count);
+    context->opens_reasoning = OpensReasoningLocked(tokens);
     if (request.reasoning.budget_tokens && !close_tokens_.empty())
       context->reasoning_budget = request.reasoning.budget_tokens;
     if (const std::size_t media = loom_text_embed_request_media(handle, nullptr,
@@ -845,9 +863,10 @@ public:
     loom.produced = false;
     loom.unconstrained = false;
     loom.flushed = false;
-    loom.reasoning = false;
+    loom.reasoning = loom.context != nullptr && loom.context->opens_reasoning;
     loom.reasoning_tokens = 0;
     loom.budget_closed = false;
+    loom.emitted = false;
     model_->Check(loom_text_embed_decoder_reset(loom.decoder), "decoder");
   }
 
@@ -861,20 +880,26 @@ public:
   [[nodiscard]] ext::InitialOutputState InitialOutputState(
       const ext::ChatRequest& request) const override {
     const auto prepared = PreparePrompt(request);
-    if (!prepared || prepared->tokens.empty())
-      return ext::InitialOutputState::kAuto;
-    const auto& tokens = prepared->tokens;
-    std::string text =
-        Decode(std::span(tokens).last(std::min<std::size_t>(tokens.size(), 4)));
+    const auto* context =
+        prepared ? dynamic_cast<const LoomPromptContext*>(prepared->context.get())
+                 : nullptr;
+    return context != nullptr && context->opens_reasoning
+               ? ext::InitialOutputState::kThought
+               : ext::InitialOutputState::kAuto;
+  }
+
+  // Whether the prompt ends inside an open "<think>" block.
+  bool OpensReasoningLocked(const std::vector<std::int32_t>& tokens) const {
+    if (tokens.empty())
+      return false;
+    std::string text = DecodeLocked(std::vector<std::int32_t>(
+        tokens.end() - std::min<std::size_t>(tokens.size(), 4), tokens.end()));
     while (!text.empty() &&
            std::isspace(static_cast<unsigned char>(text.back())))
       text.pop_back();
     static constexpr std::string_view kOpen = "<think>";
     return text.size() >= kOpen.size() &&
-                   text.compare(text.size() - kOpen.size(), kOpen.size(),
-                                kOpen) == 0
-               ? ext::InitialOutputState::kThought
-               : ext::InitialOutputState::kAuto;
+           text.compare(text.size() - kOpen.size(), kOpen.size(), kOpen) == 0;
   }
 
   // The canonical markup the output reader streams, for every package.
@@ -1335,6 +1360,15 @@ private:
     raw.resize(size);
     loom.piece_key = key;
     loom.piece = OutputLocked(loom, raw, false);
+    // The prompt opened reasoning and the model closed it at once: the
+    // output reader consumed the close as framing, so restore it for
+    // Gufo's parser, which reads this response as reasoning until a close.
+    if (!loom.emitted && !loom.piece.empty()) {
+      loom.emitted = true;
+      if (loom.reasoning && !loom.piece.starts_with("<think>") &&
+          loom.piece.find("</think>") == std::string::npos)
+        loom.piece.insert(0, "</think>");
+    }
     loom.produced = true;
     if (close_tokens_.empty() && loom.context != nullptr)
       LearnCloseLocked(loom.context->request);
