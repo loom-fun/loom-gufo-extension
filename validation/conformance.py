@@ -273,22 +273,30 @@ def _():
         return (m.get("reasoning_content") or "") + (m.get("content") or "")
     kw = dict(max_tokens=48 + ROOM // 4, **NOTHINK)
     prompt = user("Write one creative sentence about a cat.")
-    # min_p ~ 1 keeps only the most likely token whatever the temperature or seed.
-    sampled = {sd: chat(prompt, temperature=1.5, top_k=0, top_p=1.0, min_p=0.97, seed=sd, **kw) for sd in (1, 2, 3)}
+    # min_p is relative to the top probability of the temperature-scaled distribution (threshold: top logit + T * ln(min_p)). min_p = 1
+    # keeps only the top token (ties aside) whatever the temperature or seed; a value like 0.97 keeps every token within 0.05 logits of the
+    # top at T=1.5, and a creative sentence of 48+ tokens always has such near-ties (a pass of 0.97 depended on the model's logit gaps).
+    sampled = {sd: chat(prompt, temperature=1.5, top_k=0, top_p=1.0, min_p=1.0, seed=sd, **kw) for sd in (1, 2, 3)}
     if any(s != 200 for s, _ in sampled.values()):
         check("sampling: min_p / penalties", "fail", [r for s, r in sampled.values() if s != 200][:1])
         return
     texts = [out(r) for _, r in sampled.values()]
-    greedy = out(chat(prompt, **kw)[1])
+    # The reference is greedy on the host as well (logprobs: undrafted, the logit row's argmax), the path min_p takes: a drafted package's
+    # device greedy runs other kernels (batched verification) and may part from the row's argmax at a near-tie of its own.
+    greedy = out(chat(prompt, logprobs=True, **kw)[1])
     free = [out(chat(prompt, temperature=1.5, top_k=0, top_p=1.0, seed=sd, **kw)[1]) for sd in (1, 2)]
-    min_p_ok = len(set(texts)) == 1 and texts[0] == greedy and free[0] != free[1]
+    same = len(set(texts)) == 1
+    min_p_ok = same and texts[0] == greedy and free[0] != free[1]
+    if not min_p_ok:   # which part, and where: a failure must say what differed
+        d = next((i for i, (x, y) in enumerate(zip(texts[0], greedy)) if x != y), min(len(texts[0]), len(greedy)))
+        min_p_why = f"seeds agree={same}; equals host greedy={texts[0] == greedy} (first difference at character {d}); unconstrained seeds differ={free[0] != free[1]}"
     # A strong repetition penalty changes a greedy answer that repeats itself.
     rep = user("Repeat the word 'echo' twenty times, separated by spaces.")
     plain = out(chat(rep, **kw)[1])
     punished = out(chat(rep, repeat_penalty=1.6, frequency_penalty=1.0, presence_penalty=1.0, **kw)[1])
     penalty_ok = plain != punished
     check("sampling: min_p / penalties", needs_logits(min_p_ok and penalty_ok, ""),
-          f"min_p holds greedy={min_p_ok}; penalties change the output={penalty_ok}")
+          f"min_p holds greedy={min_p_ok}; penalties change the output={penalty_ok}" + ("" if min_p_ok else f" ({min_p_why})"))
 
 
 @guarded("logprobs")
