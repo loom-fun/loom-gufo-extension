@@ -441,7 +441,19 @@ public:
     const auto* context =
         prepared ? dynamic_cast<const LoomPromptContext*>(prepared->context.get())
                  : nullptr;
-    return context != nullptr && context->opens_reasoning
+    // A model that always reasons starts in reasoning even when the request
+    // turned it off: a grammar must leave it room to reason and frame its
+    // answer (harmony's final channel) instead of forcing the answer first.
+    // Only requests that build such a grammar: a plain turn may skip
+    // reasoning, and its answer must then parse as content.
+    const bool constrained =
+        request.response_format != nullptr ||
+        request.tool_choice == ext::ChatRequest::ToolChoice::kRequired ||
+        !request.forced_tool_name.empty();
+    const bool always = model_->logits().enabled && native_.known &&
+                        native_.always_reasons &&
+                        !native_.reasoning_open.empty() && constrained;
+    return context != nullptr && (context->opens_reasoning || always)
                ? ext::InitialOutputState::kThought
                : ext::InitialOutputState::kAuto;
   }

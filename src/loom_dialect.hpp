@@ -38,6 +38,9 @@ struct NativeDialect {
   // Glimmer's channel format: the reasoning markers above are the ones the
   // output carries after the generation prompt.
   bool atem{false};
+  // The model reasons whatever the request says (chat.thinking "always"), so
+  // its output always starts in reasoning, prompt-opened or not.
+  bool always_reasons{false};
 };
 
 // `chat` is the "chat" object of the package's llm_config.json.
@@ -153,6 +156,7 @@ inline NativeDialect NativeDialectOf(const json::Value& chat) {
     dialect.atem = true;
   }
   // none (no tool calls): no descriptor.
+  dialect.always_reasons = chat.member_str("thinking") == "always";
   const std::string open = chat.member_str("think_open");
   if (chat.member_str("thinking", "never") != "never" && !open.empty()) {
     dialect.reasoning_open = open;
