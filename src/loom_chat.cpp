@@ -140,6 +140,11 @@ std::string ChatBody(const std::string& model, const ext::ChatRequest& request,
         definition["type"] = "function";
         definition["function"] = std::move(function);
       }
+      // "strict" is Gufo's to enforce (the host grammar over the returned logits); Loom's chat parser (hrx-system v0.1.0) refuses
+      // strict=true outright ("strict constrained tool sampling is not implemented"), so the rendered prompt carries it off.
+      if (definition.is_object() && definition.contains("function") && definition["function"].is_object() &&
+          definition["function"].contains("strict"))
+        definition["function"]["strict"] = false;
       tools.push_back(std::move(definition));
     }
     body["tools"] = std::move(tools);
