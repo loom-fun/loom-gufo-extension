@@ -109,7 +109,7 @@ has to leave the logits somewhere the embed layer can read.
   auto) stays on the device until it restricts. Grammars constrain the model's own tokens, not the canonical
   markup the runner publishes, so the runner describes the model's spelling to Gufo (`ToolGrammarSyntax` and
   `ReasoningGrammarMarkers`, a small addition to the text runner contract in loom-fun/gufo): the package's
-  `llm_config.json` names its tool-call format and reasoning markers and `src/loom_dialect.hpp` maps them
+  `llm_config.json` (listed in `model.json`, so loom-fetch delivers it) names its tool-call format and reasoning markers and `src/loom_dialect.hpp` maps them
   to Gufo's `ToolSyntax` (Qwen XML, Hermes JSON, GLM tags, Gemma 4, OpenAI harmony, Llama JSON, Python-style call
   lists with keyword arguments, and Glimmer's ATEM messages; the last two use the descriptor's `block_close` /
   `call_separator`, `ValueSyntax::keyword_root` and `repeat_prefix`/`repeat_suffix`). Parsing of the published

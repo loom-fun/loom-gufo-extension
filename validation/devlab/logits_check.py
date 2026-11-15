@@ -97,7 +97,7 @@ schema = {"type": "json_schema", "json_schema": {"name": "x", "strict": True, "s
 
 def grammar():
     s, r = call({"model": MODEL, "messages": [{"role": "user", "content": "Give a number and a word as JSON."}],
-                 "temperature": 0, "max_tokens": 200, "response_format": schema, **NOTHINK})
+                 "temperature": 0, "max_tokens": 2500, "response_format": schema, **NOTHINK})
     return s, r
 
 

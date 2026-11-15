@@ -3,9 +3,9 @@
 // A Loom package's chat program reads the model's native output (its tool-call
 // syntax, its reasoning markers) and the runner publishes it as the canonical
 // markup Gufo parses. Grammars constrain the model's tokens, so on the host-sampling path they
-// must be written in the native spelling. The package says which one it
-// speaks in llm_config.json (the generator's input, shipped in the package):
-// chat.call_format, chat.think_open / think_end. This file maps those to
+// must be written in the native spelling. The package names it in its
+// llm_config.json (chat.call_format, chat.think_open / think_end, ...), which
+// model.json lists so loom-fetch delivers it. This file maps those to
 // Gufo's JsonConstraint::ToolSyntax and to the reasoning markers a grammar
 // uses; a package without tool calls has no syntax, and its tool requests stay
 // unconstrained.
@@ -21,8 +21,7 @@
 namespace gufo::loom {
 
 struct NativeDialect {
-  // llm_config.json named the dialect (otherwise the runner probes the chat
-  // program for the one JSON dialect it can recognize).
+  // The package declared its dialect.
   bool known{false};
   std::string call_format;
   // The native call syntax; nullopt when Gufo's grammars cannot spell it.

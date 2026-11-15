@@ -152,8 +152,8 @@ public:
   LoomModel& operator=(const LoomModel&) = delete;
 
   [[nodiscard]] const loom_text_embed_info_t& info() const { return info_; }
-  // The "chat" object of the package's llm_config.json (the generator's input,
-  // shipped in the package), when it has one.
+  // The package's chat dialect: the "chat" object of its llm_config.json,
+  // when it has one.
   [[nodiscard]] const std::optional<json::Value>& chat_config() const {
     return chat_config_;
   }
@@ -205,6 +205,8 @@ private:
   std::uint64_t next_checkpoint_{1};
   std::string fingerprint_;
 
+  // The "chat" object of the package's llm_config.json (the kit's input,
+  // which model.json lists so loom-fetch delivers it).
   static std::optional<json::Value> LoadChatConfig(const std::string& path) {
     const auto manifest = ManifestPath(path);
     if (!manifest)

@@ -2,6 +2,7 @@
 // (fake_embed.cpp): no GPU. Builds with build_test.sh against a Gufo checkout.
 #include "../src/loom_runner.cpp"  // the runner's types live in an anonymous namespace
 
+#include <unistd.h>
 #include <cmath>
 #include <cstdlib>
 #include <iostream>
@@ -42,8 +43,11 @@ public:
     std::ofstream(dir_ / "model.json")
         << R"({"schema_version":1,"programs":{},"services":{"chat":{"kind":"text"}},)"
            R"("variants":{"v":{"services":{"chat":{"config":{"llm.card":true,"llm.logits":false}}}}}})";
-    if (!chat.empty())
-      std::ofstream(dir_ / "llm_config.json") << R"({"chat":)" << chat << "}";
+    // The package's dialect (llm_config.json "chat"); Hermes JSON by default,
+    // none at all for "{}".
+    if (chat != "{}")
+      std::ofstream(dir_ / "llm_config.json")
+          << R"({"chat":)" << (chat.empty() ? R"({"call_format":"hermes"})" : chat) << "}";
     ext::ParsedOptions options;
     if (!logits)
       options["--loom-logits"] = std::string("off");
@@ -368,12 +372,12 @@ void TestLazyGrammarStaysOnDevice() {
 
 
 void TestDialectGating() {
-  std::cerr << "dialect: tool grammars stay off for another native call syntax\n";
+  std::cerr << "dialect: a package that declares none keeps tool grammars off\n";
   fake::reset();
   fake::state().script = PeakScript;
   fake::state().tool_call_text =
       "<tool_call>\n<function=qprobe>\n<parameter=zz>\n7\n</parameter>\n</function>\n</tool_call>";
-  Fixture f;
+  Fixture f(true, 2, "{}");  // no llm_config.json
   CHECK(!f.runner->NativeToolGrammar());
   json::Value params = json::parse(
       R"({"type":"object","properties":{"city":{"type":"string"}},"required":["city"],"additionalProperties":false})");
@@ -401,7 +405,7 @@ void TestDialectGating() {
   fake::reset();
   fake::state().script = PeakScript;
   fake::state().reasoning_close = "<|end|>";
-  Fixture g;
+  Fixture g(true, 2, "{}");
   sampling::SamplingConfig plain;
   plain.constraint = g.runner->BindConstraint(sampling::JsonConstraint::Object());
   const auto no_grammar = g.Generate(0, plain, 6);

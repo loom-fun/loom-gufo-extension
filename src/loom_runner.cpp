@@ -154,19 +154,14 @@ public:
                  source);
     if (model_->logits().enabled) {
       // Host sampling applies Gufo's grammars to the model's own tokens, so
-      // they must be written in the dialect the model speaks: the package
-      // names it (llm_config.json); an older package is probed for the one
-      // JSON dialect that can be recognized from its chat program.
+      // they must be written in the dialect the model speaks, which the
+      // package's llm_config.json names. Without it, tool grammars stay off.
       if (model_->chat_config()) {
         native_ = NativeDialectOf(*model_->chat_config());
         reasoning_ok_ = true;
       } else {
         reasoning_ok_ = close_tokens_.empty() ||
                         Trimmed(DecodeLocked(close_tokens_)) == "</think>";
-        if (ProbeJsonToolCalls())
-          native_.tools = NativeDialectOf(json::parse(
-                                              R"({"call_format":"hermes"})"))
-                              .tools;
       }
       std::fprintf(stderr,
                    "loom: logits on (%u floats per row); native tool calls: "
@@ -175,7 +170,7 @@ public:
                    native_.tools ? "grammar available" : "no grammar",
                    native_.known
                        ? (" (" + native_.call_format + ")").c_str()
-                       : " (probed)",
+                       : " (undeclared)",
                    !reasoning_ok_ ? "differ: grammars stay off"
                    : native_.reasoning_open.empty()
                        ? "none"
@@ -963,59 +958,6 @@ private:
     while (at < text.size() && space(text[at]))
       ++at;
     return text.substr(at);
-  }
-
-  // Whether the package's chat program writes a tool call the way Gufo's
-  // JSON grammar expects ("<tool_call>{"name": ..., "arguments": ...}"): render
-  // a placeholder call and read it back. Native XML, pythonic or special-token
-  // syntaxes differ, so their tool grammars stay off (the request is served
-  // unconstrained, as before).
-  bool ProbeJsonToolCalls() const {
-    try {
-      ext::ChatRequest request;
-      request.messages.emplace_back(ext::ChatRole::kUser, "Hi.");
-      ext::ChatMessage call(ext::ChatRole::kAssistant, "");
-      call.tool_calls.push_back(
-          {.id = "call_1",
-           .name = "qprobe",
-           .arguments = {{.name = "zz", .value = "7", .is_string = false}}});
-      request.messages.push_back(std::move(call));
-      ext::ChatMessage result(ext::ChatRole::kTool, "ok");
-      result.tool_call_id = "call_1";
-      request.messages.push_back(std::move(result));
-      request.tools.push_back({.name = "qprobe",
-                               .description = "probe",
-                               .parameters_json =
-                                   "{\"type\":\"object\",\"properties\":{\"zz\":"
-                                   "{\"type\":\"integer\"}}}"});
-      const auto body = ChatBody(model_->info().model_id, request);
-      std::vector<std::int32_t> tokens(model_->info().context_capacity);
-      std::size_t count = 0;
-      if (loom_text_embed_chat_prepare(model_->embed(), body.data(),
-                                       body.size(), tokens.data(),
-                                       tokens.size(), &count, nullptr) != 0)
-        return false;
-      tokens.resize(count);
-      const std::string text = DecodeLocked(tokens);
-      const auto name = text.rfind("qprobe");
-      if (name == std::string::npos)
-        return false;
-      // The last occurrence is inside the rendered call (the tool list comes
-      // first): look just before it for the JSON call head.
-      const std::size_t from = name > 96 ? name - 96 : 0;
-      const std::string head = text.substr(from, name - from);
-      const auto open = head.rfind("<tool_call>");
-      if (open == std::string::npos ||
-          head.find("<function", open) != std::string::npos)
-        return false;
-      const std::string after = Trimmed(head.substr(open + 11));
-      const std::string tail =
-          text.substr(name, std::min<std::size_t>(160, text.size() - name));
-      return after.rfind("{", 0) == 0 && after.find("\"name\"") != std::string::npos &&
-             tail.find("\"arguments\"") != std::string::npos;
-    } catch (const std::exception&) {
-      return false;
-    }
   }
 
   // Releases the request's grammar once: the package samples on device, so

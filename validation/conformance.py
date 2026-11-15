@@ -107,7 +107,7 @@ def _():
 
 @guarded("chat basic")
 def _():
-    s, r = chat(user("What is the capital of France? Answer with one word."), max_tokens=256, **NOTHINK)
+    s, r = chat(user("What is the capital of France? Answer with one word."), max_tokens=256 + ROOM, **NOTHINK)
     text = (r["choices"][0]["message"].get("content") or "") if s == 200 else r
     check("chat basic", "pass" if s == 200 and "paris" in text.lower() else "fail", text)
 
@@ -117,7 +117,7 @@ def _():
     msgs = [{"role": "system", "content": "Always answer in uppercase."}, {"role": "user", "content": "Say hello."},
             {"role": "assistant", "content": "HELLO."}, {"role": "developer", "content": "Keep answers to one word."},
             {"role": "user", "content": "Say goodbye."}]
-    s, r = chat(msgs, max_tokens=256, **NOTHINK)
+    s, r = chat(msgs, max_tokens=256 + ROOM, **NOTHINK)
     check("system/developer anywhere", "pass" if s == 200 and r["choices"][0]["message"].get("content") else "fail",
           r["choices"][0]["message"].get("content") if s == 200 else r)
 
@@ -186,7 +186,7 @@ def _():
 
 @guarded("tool_choice required")
 def _():
-    s, r = chat(user("Hello there!"), tools=TOOLS, tool_choice="required", max_tokens=2000)
+    s, r = chat(user("Hello there!"), tools=TOOLS, tool_choice="required", max_tokens=2000 + ROOM)
     calls = r["choices"][0]["message"].get("tool_calls") if s == 200 else None
     ok = bool(calls) and calls[0]["function"]["name"] == "get_weather"
     check("tool_choice required", needs_logits(ok, ""),
@@ -199,7 +199,7 @@ def _():
         "name": "get_time", "description": "Get the current time in a city.",
         "parameters": {"type": "object", "properties": {"city": {"type": "string"}}, "required": ["city"]}}}]
     choice = {"type": "function", "function": {"name": "get_time"}}
-    s, r = chat(user("What is the weather in Paris?"), tools=tools, tool_choice=choice, max_tokens=2000)
+    s, r = chat(user("What is the weather in Paris?"), tools=tools, tool_choice=choice, max_tokens=2000 + ROOM)
     calls = r["choices"][0]["message"].get("tool_calls") if s == 200 else None
     ok = bool(calls) and all(c["function"]["name"] == "get_time" for c in calls)
     check("tool_choice named", needs_logits(ok, ""),
@@ -213,7 +213,7 @@ def _():
         "parameters": {"type": "object", "properties": {"mode": {"type": "string", "enum": ["eco", "boost", "idle"]}},
                        "required": ["mode"], "additionalProperties": False}}}
     s, r = chat(user("Set the device to turbo mode, nothing else is valid but turbo."), tools=[tool],
-                tool_choice="required", max_tokens=2000)
+                tool_choice="required", max_tokens=2000 + ROOM)
     calls = r["choices"][0]["message"].get("tool_calls") if s == 200 else None
     try:
         mode = json.loads(calls[0]["function"]["arguments"]).get("mode") if calls else None
@@ -230,7 +230,7 @@ def _():
                                          "unit": {"type": "string", "enum": ["c", "f"]}},
         "required": ["city", "country", "unit"], "additionalProperties": False}}}
     s, r = chat(user("Name the capital of Japan as JSON with keys city and country, and unit set to kelvin."),
-                response_format=schema, max_tokens=500, **NOTHINK)
+                response_format=schema, max_tokens=500 + ROOM, **NOTHINK)
     text = r["choices"][0]["message"].get("content") or "" if s == 200 else str(r)
     try:
         obj = json.loads(text.strip().removeprefix("```json").removesuffix("```").strip())
