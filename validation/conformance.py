@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
 """Gufo feature conformance for one served model (gufo serve llm --model <loom package>).
 
-Usage: conformance.py BASE_URL OUT.json [--quick]
+Usage: conformance.py BASE_URL OUT.json [--logits]
 Each check records pass/fail/gap and evidence. "gap" marks a Gufo feature the
-Loom path cannot honor today (needs logits), checked for graceful behavior.
+Loom path cannot honor without the package's logits (the package was not built
+with llm.logits, or the server runs --loom-logits=off); the checks then only
+look for graceful behavior. With --logits (the server runs a logits-capable
+package with the capability on) the same checks must really hold: a miss is a
+"fail", not a "gap".
 """
 import concurrent.futures as cf
 import http.client
@@ -15,6 +19,7 @@ import urllib.parse
 import urllib.request
 
 BASE, OUT = sys.argv[1], sys.argv[2]
+LOGITS = "--logits" in sys.argv[3:]
 URL = urllib.parse.urlparse(BASE)
 TOOLS = [{"type": "function", "function": {
     "name": "get_weather", "description": "Get the current weather for a city.",
@@ -57,6 +62,11 @@ def sse(path, body, timeout=600):
 def check(name, status, detail):
     results.append({"check": name, "status": status, "detail": str(detail)[:300]})
     print(f"{status.upper():5} {name}: {str(detail)[:160]}", flush=True)
+
+
+def needs_logits(ok, detail):
+    """pass, or - without logits - the documented gap; with --logits a miss is a failure."""
+    return "pass" if ok else ("fail" if LOGITS else "gap")
 
 
 def guarded(name):
@@ -178,25 +188,57 @@ def _():
 def _():
     s, r = chat(user("Hello there!"), tools=TOOLS, tool_choice="required", max_tokens=2000)
     calls = r["choices"][0]["message"].get("tool_calls") if s == 200 else None
-    check("tool_choice required", "pass" if calls else "gap",
-          f"constrained decoding unavailable (no logits); call made: {bool(calls)}")
+    ok = bool(calls) and calls[0]["function"]["name"] == "get_weather"
+    check("tool_choice required", needs_logits(ok, ""),
+          f"call made: {bool(calls)}" + ("" if ok else "; constrained decoding needs logits"))
+
+
+@guarded("tool_choice named")
+def _():
+    tools = TOOLS + [{"type": "function", "function": {
+        "name": "get_time", "description": "Get the current time in a city.",
+        "parameters": {"type": "object", "properties": {"city": {"type": "string"}}, "required": ["city"]}}}]
+    choice = {"type": "function", "function": {"name": "get_time"}}
+    s, r = chat(user("What is the weather in Paris?"), tools=tools, tool_choice=choice, max_tokens=2000)
+    calls = r["choices"][0]["message"].get("tool_calls") if s == 200 else None
+    ok = bool(calls) and all(c["function"]["name"] == "get_time" for c in calls)
+    check("tool_choice named", needs_logits(ok, ""),
+          f"calls={[c['function']['name'] for c in calls] if calls else None}" + ("" if ok else "; needs logits"))
+
+
+@guarded("strict tool schema")
+def _():
+    tool = {"type": "function", "function": {
+        "name": "set_mode", "description": "Set the mode of the device.", "strict": True,
+        "parameters": {"type": "object", "properties": {"mode": {"type": "string", "enum": ["eco", "boost", "idle"]}},
+                       "required": ["mode"], "additionalProperties": False}}}
+    s, r = chat(user("Set the device to turbo mode, nothing else is valid but turbo."), tools=[tool],
+                tool_choice="required", max_tokens=2000)
+    calls = r["choices"][0]["message"].get("tool_calls") if s == 200 else None
+    try:
+        mode = json.loads(calls[0]["function"]["arguments"]).get("mode") if calls else None
+    except Exception:
+        mode = None
+    check("strict tool schema", needs_logits(mode in ("eco", "boost", "idle"), ""),
+          f"mode={mode!r}" + ("" if mode in ("eco", "boost", "idle") else "; enum not enforced (needs logits)"))
 
 
 @guarded("response_format json_schema")
 def _():
-    schema = {"type": "json_schema", "json_schema": {"name": "city", "schema": {
-        "type": "object", "properties": {"city": {"type": "string"}, "country": {"type": "string"}},
-        "required": ["city", "country"]}}}
-    s, r = chat(user("Name the capital of Japan as JSON with keys city and country."),
+    schema = {"type": "json_schema", "json_schema": {"name": "city", "strict": True, "schema": {
+        "type": "object", "properties": {"city": {"type": "string"}, "country": {"type": "string"},
+                                         "unit": {"type": "string", "enum": ["c", "f"]}},
+        "required": ["city", "country", "unit"], "additionalProperties": False}}}
+    s, r = chat(user("Name the capital of Japan as JSON with keys city and country, and unit set to kelvin."),
                 response_format=schema, max_tokens=500, **NOTHINK)
     text = r["choices"][0]["message"].get("content") or "" if s == 200 else str(r)
     try:
         obj = json.loads(text.strip().removeprefix("```json").removesuffix("```").strip())
-        valid = isinstance(obj, dict) and "city" in obj
+        valid = isinstance(obj, dict) and set(obj) == {"city", "country", "unit"} and obj["unit"] in ("c", "f")
     except Exception:
         valid = False
-    check("response_format json_schema", "pass" if valid and s == 200 else "gap",
-          f"grammar not enforced (no logits); output {'valid' if valid else 'invalid'} JSON: {text[:80]!r}")
+    check("response_format json_schema", needs_logits(valid and s == 200, ""),
+          f"{'valid' if valid else 'invalid'} against the schema: {text[:80]!r}")
 
 
 @guarded("stop + max_tokens + finish reasons")
@@ -226,16 +268,43 @@ def _():
 
 @guarded("sampling: min_p / penalties")
 def _():
-    s, r = chat(user("Say hi."), max_tokens=20, min_p=0.1, repeat_penalty=1.2, presence_penalty=0.5, **NOTHINK)
-    check("sampling: min_p / penalties", "gap" if s == 200 else "fail",
-          "accepted; not applied by the package's device sampler (needs logits)" if s == 200 else r)
+    def out(r):
+        m = r["choices"][0]["message"]
+        return (m.get("reasoning_content") or "") + (m.get("content") or "")
+    kw = dict(max_tokens=48 + ROOM // 4, **NOTHINK)
+    prompt = user("Write one creative sentence about a cat.")
+    # min_p ~ 1 keeps only the most likely token whatever the temperature or seed.
+    sampled = {sd: chat(prompt, temperature=1.5, top_k=0, top_p=1.0, min_p=0.97, seed=sd, **kw) for sd in (1, 2, 3)}
+    if any(s != 200 for s, _ in sampled.values()):
+        check("sampling: min_p / penalties", "fail", [r for s, r in sampled.values() if s != 200][:1])
+        return
+    texts = [out(r) for _, r in sampled.values()]
+    greedy = out(chat(prompt, **kw)[1])
+    free = [out(chat(prompt, temperature=1.5, top_k=0, top_p=1.0, seed=sd, **kw)[1]) for sd in (1, 2)]
+    min_p_ok = len(set(texts)) == 1 and texts[0] == greedy and free[0] != free[1]
+    # A strong repetition penalty changes a greedy answer that repeats itself.
+    rep = user("Repeat the word 'echo' twenty times, separated by spaces.")
+    plain = out(chat(rep, **kw)[1])
+    punished = out(chat(rep, repeat_penalty=1.6, frequency_penalty=1.0, presence_penalty=1.0, **kw)[1])
+    penalty_ok = plain != punished
+    check("sampling: min_p / penalties", needs_logits(min_p_ok and penalty_ok, ""),
+          f"min_p holds greedy={min_p_ok}; penalties change the output={penalty_ok}")
 
 
 @guarded("logprobs")
 def _():
-    s, r = chat(user("Say hi."), max_tokens=5, logprobs=True, top_logprobs=2, **NOTHINK)
+    s, r = chat(user("Say hi."), max_tokens=5 + ROOM // 4, logprobs=True, top_logprobs=3, **NOTHINK)
     lp = r["choices"][0].get("logprobs") if s == 200 else None
-    check("logprobs", "pass" if lp and lp.get("content") else "gap", f"HTTP {s}: {str(r)[:120]}")
+    content = (lp or {}).get("content") or []
+    ok = bool(content)
+    for entry in content:
+        top = entry.get("top_logprobs") or []
+        mass = sum(2.718281828 ** t["logprob"] for t in top)
+        # greedy: the sampled token is the most likely; probabilities are consistent
+        ok = ok and len(top) == 3 and entry["logprob"] <= 1e-6 and mass <= 1.0001 \
+            and abs(top[0]["logprob"] - entry["logprob"]) < 1e-3 and top[0]["token"] == entry["token"] \
+            and all(top[i]["logprob"] >= top[i + 1]["logprob"] for i in range(2))
+    check("logprobs", needs_logits(ok, ""), f"HTTP {s}: {len(content)} tokens; {str(content[:1])[:120]}")
 
 
 @guarded("Responses API")

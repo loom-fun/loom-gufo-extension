@@ -51,6 +51,20 @@
       "help": "Device memory Loom may use for weights and state (default: no limit)"
     },
     {
+      "name": "--loom-logits",
+      "type": "string",
+      "commands": [
+        "serve",
+        "prompt",
+        "chat",
+        "bench"
+      ],
+      "providers": [
+        "loom-text"
+      ],
+      "help": "Logits readback for host sampling (grammars, logprobs, min-p, penalties): auto, on or off (default: auto, on when the package declares it)"
+    },
+    {
       "name": "--loom-preset",
       "type": "string",
       "commands": [

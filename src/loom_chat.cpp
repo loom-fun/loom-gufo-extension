@@ -175,7 +175,7 @@ std::string ChatBody(const std::string& model, const ext::ChatRequest& request,
 
 // A request body that only carries sampling, for row binding.
 std::string SamplingBody(const std::string& model,
-                         const sampling::SamplingConfig& config) {
+                         const sampling::SamplingConfig& config, bool logits) {
   json::Value body = json::Value::object();
   body["model"] = model;
   json::Value message = json::Value::object();
@@ -190,6 +190,8 @@ std::string SamplingBody(const std::string& model,
     body["top_k"] = config.top_k;
   if (config.seed >= 0)
     body["seed"] = config.seed;
+  if (logits)
+    body["logits"] = true;
   return body.dump();
 }
 

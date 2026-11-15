@@ -18,8 +18,14 @@
 //   blocks. Gufo's parsers then serve every endpoint for every architecture.
 //
 // Sampling runs on device with the package's sampler (temperature, top-k,
-// top-p, seed); Gufo's grammar constraints, logprobs, min-p and penalties
-// need logits, which Loom packages do not expose.
+// top-p, seed). Gufo's grammar constraints, logprobs, min-p and penalties need
+// the logit row, which a package that declares "llm.logits" returns when it is
+// loaded with the capability (--loom-logits, default auto): a request that
+// needs them is marked "logits": true for the package, every selection of its
+// row leaves the full row, and the token is chosen here with Gufo's
+// SamplerState and fed back through the epoch (decode_batch_tokens). Every
+// other request, and every package without the capability, keeps the device
+// path unchanged.
 
 #include "loom_cache.hpp"
 #include "loom_chat.hpp"
@@ -38,6 +44,7 @@ public:
     slot->position = 0;
     slot->deferred = -1;
     slot->stale = true;
+    ResetHost();
   }
   [[nodiscard]] std::uint32_t row() const { return slot->row(); }
   [[nodiscard]] std::size_t position() const { return slot->position; }
@@ -60,6 +67,33 @@ public:
   bool budget_closed{false};
   // Whether any canonical output text was streamed yet.
   bool emitted{false};
+
+  // Host sampling (the logits capability). `flag` is what the row's bound
+  // sampling asks of the package's next epoch; `sticky` keeps it on once a
+  // constraint restricts; `hosted` says the request samples on the host when
+  // it needs to.
+  bool flag{false};
+  bool sticky{false};
+  bool hosted{false};
+  bool hosted_known{false};
+  // The next selection when the host already chose it (from the row's
+  // logits, right after the epoch that produced them).
+  struct HostNext {
+    TextRunnerToken token{0};
+    bool stop{false};
+    std::uint64_t rng{0};
+    std::optional<sampling::TokenLogprobs> logprobs;
+  };
+  std::optional<HostNext> next;
+  // SelectNext's sampler, for the Advance that follows it.
+  std::unique_ptr<sampling::SamplerState> snapshot;
+  std::vector<float> logits;
+
+  void ResetHost() {
+    flag = sticky = hosted = hosted_known = false;
+    next.reset();
+    snapshot.reset();
+  }
 };
 
 LoomState& Require(ext::TextRunnerState& state) {
@@ -113,6 +147,19 @@ public:
                      ? "unknown; reasoning budgets are not enforced"
                      : ("'" + DecodeLocked(close_tokens_) + "'").c_str(),
                  source);
+    if (model_->logits().enabled) {
+      // Host sampling applies Gufo's grammars to the model's own tokens, so
+      // they must be written in the dialect the model speaks.
+      reasoning_ok_ = close_tokens_.empty() ||
+                      Trimmed(DecodeLocked(close_tokens_)) == "</think>";
+      json_tools_ = ProbeJsonToolCalls();
+      std::fprintf(stderr,
+                   "loom: logits on (%u floats per row); reasoning markers "
+                   "%s, native tool calls %s\n",
+                   model_->logits().width,
+                   reasoning_ok_ ? "match" : "differ: grammars stay off",
+                   json_tools_ ? "match" : "differ: tool grammars stay off");
+    }
   }
 
   [[nodiscard]] ext::TextRunnerDescriptor Descriptor() const override {
@@ -168,6 +215,16 @@ public:
     return plans;
   }
 
+  // Whether the package's native tool calls are the JSON dialect Gufo's
+  // grammar writes (logits load only).
+  [[nodiscard]] bool NativeJsonTools() const { return json_tools_; }
+
+  [[nodiscard]] bool IsStopToken(std::uint32_t id) const {
+    std::lock_guard lock(model_->mutex());
+    return loom_text_embed_is_stop_token(model_->embed(),
+                                         static_cast<std::int32_t>(id)) != 0;
+  }
+
   [[nodiscard]] std::uint32_t VocabularySize() const override {
     std::lock_guard lock(model_->mutex());
     return static_cast<std::uint32_t>(
@@ -178,10 +235,15 @@ public:
   // device, so the grammar is released (see Unconstrain).
   [[nodiscard]] std::shared_ptr<const sampling::ConstraintVocabulary>
   BuildConstraintVocabulary() const override {
+    // The package's stop token ends a response: grammars admit it once they
+    // are complete (host sampling only; the device path never sees a grammar).
     return std::make_shared<const sampling::ConstraintVocabulary>(
         VocabularySize(), [this](std::uint32_t id) {
+          const bool stop = IsStopToken(id);
           return sampling::ConstraintVocabulary::Piece{
-              Decode(std::span<const TextRunnerToken>(&id, 1)), false};
+              stop ? std::string()
+                   : Decode(std::span<const TextRunnerToken>(&id, 1)),
+              stop};
         });
   }
 
@@ -231,6 +293,8 @@ public:
     auto context = std::make_shared<LoomPromptContext>(model_, handle);
     tokens.resize(count);
     context->opens_reasoning = OpensReasoningLocked(tokens);
+    context->constraint_ok = model_->logits().enabled && reasoning_ok_ &&
+                             (request.tools.empty() || json_tools_);
     if (request.reasoning.budget_tokens && !close_tokens_.empty())
       context->reasoning_budget = request.reasoning.budget_tokens;
     if (const std::size_t media = loom_text_embed_request_media(handle, nullptr,
@@ -311,6 +375,7 @@ public:
     loom.reasoning_tokens = 0;
     loom.budget_closed = false;
     loom.emitted = false;
+    loom.ResetHost();
     model_->Check(loom_text_embed_decoder_reset(loom.decoder), "decoder");
   }
 
@@ -584,18 +649,26 @@ public:
       ext::TextRunnerState& state,
       sampling::SamplerState& sampler) const override {
     auto& loom = Require(state);
-    Unconstrain(loom, sampler);
     std::lock_guard lock(model_->mutex());
-    PrepareLocked(loom, sampler.config());
+    PrepareLocked(loom, sampler);
     if (const auto forced = sampler.ForcedToken())
       return {.token = *forced, .piece = PieceLocked(loom, *forced)};
-    return SelectionLocked(loom);
+    auto selection = SelectionLocked(loom, &sampler);
+    // The Advance that follows chooses the next epoch's flag from this
+    // sampler once the selected token is accepted.
+    if (loom.hosted)
+      loom.snapshot = std::make_unique<sampling::SamplerState>(sampler);
+    return selection;
   }
 
   void Advance(ext::TextRunnerState& state,
                TextRunnerToken token) const override {
     auto& loom = Require(state);
     std::lock_guard lock(model_->mutex());
+    if (loom.hosted && loom.snapshot) {
+      AdvanceHostedLocked(loom, token);
+      return;
+    }
     AdvanceLocked(loom, token);
   }
 
@@ -608,6 +681,10 @@ public:
     for (std::size_t i = 0; i < advances.size(); ++i) {
       try {
         auto& loom = Require(advances[i].state.get());
+        if (loom.hosted && loom.snapshot) {
+          AdvanceHostedLocked(loom, advances[i].token);
+          continue;
+        }
         if (loom.slot->deferred >= 0 ||
             static_cast<TextRunnerToken>(loom_text_embed_row_token(
                 embed, loom.row())) != advances[i].token) {
@@ -653,7 +730,8 @@ public:
   // One packed epoch for every session Gufo batches; drafted when the
   // package has a drafter. After the epoch each row's next selection is
   // known, so a response that ends here releases its withheld output (tool
-  // calls) with its last token.
+  // calls) with its last token. Requests that sample on the host (logits)
+  // run their own undrafted epoch with the host's token.
   [[nodiscard]] std::vector<ext::TextDecodeStep> DecodeBatch(
       std::span<const ext::TextRunnerDecode> decodes) const override {
     std::vector<ext::TextDecodeStep> steps(decodes.size());
@@ -662,6 +740,14 @@ public:
     const std::uint32_t depth = model_->info().draft_depth;
     std::vector<std::size_t> active;
     std::vector<std::uint32_t> rows, limits;
+    // Rows whose token the host chose: index, token, the request's sampler
+    // after accepting it.
+    struct Hosted {
+      std::size_t index;
+      std::int32_t token;
+      std::unique_ptr<sampling::SamplerState> probe;
+    };
+    std::vector<Hosted> hosted;
     for (std::size_t i = 0; i < decodes.size(); ++i) {
       try {
         auto& loom = Require(decodes[i].state.get());
@@ -669,8 +755,7 @@ public:
         if (remaining == 0)
           continue;
         auto& sampler = decodes[i].sampler.get();
-        Unconstrain(loom, sampler);
-        PrepareLocked(loom, sampler.config());
+        PrepareLocked(loom, sampler);
         if (CloseReasoningLocked(loom, steps[i], remaining))
           continue;
         if (const auto forced = sampler.ForcedToken()) {
@@ -682,9 +767,23 @@ public:
           FinishLocked(loom, steps[i], remaining);
           continue;
         }
-        auto selection = SelectionLocked(loom);
+        auto selection = SelectionLocked(loom, &sampler);
         if (selection.stop) {
           steps[i].stop = true;
+          steps[i].terminal_logprobs = std::move(selection.logprobs);
+          continue;
+        }
+        if (loom.hosted) {
+          // The epoch that consumes this token leaves the logits of the
+          // next selection when the host will need them.
+          EnsureExtentLocked(loom, 2);
+          auto probe = std::make_unique<sampling::SamplerState>(sampler);
+          probe->Accept(static_cast<sampling::TokenId>(selection.token));
+          loom.flag = NeedLocked(loom, sampler.config(), *probe);
+          BindLocked(loom, sampler.config());
+          hosted.push_back({i, static_cast<std::int32_t>(selection.token),
+                            std::move(probe)});
+          steps[i].selections.push_back(std::move(selection));
           continue;
         }
         const std::uint32_t limit =
@@ -699,6 +798,33 @@ public:
         limits.push_back(limit);
       } catch (...) {
         steps[i].failure = std::current_exception();
+      }
+    }
+    if (!hosted.empty()) {
+      try {
+        std::vector<std::uint32_t> hosted_rows;
+        std::vector<std::int32_t> hosted_tokens;
+        for (const auto& h : hosted) {
+          hosted_rows.push_back(Require(decodes[h.index].state.get()).row());
+          hosted_tokens.push_back(h.token);
+        }
+        model_->Check(loom_text_embed_decode_batch_tokens(
+                          embed, hosted_rows.data(), hosted_rows.size(),
+                          hosted_tokens.data()),
+                      "decode");
+        for (auto& h : hosted) {
+          auto& loom = Require(decodes[h.index].state.get());
+          CommitLocked(loom);
+          if (loom.flag)
+            SampleNextLocked(loom, *h.probe);
+          else
+            loom.next.reset();
+          FinishLocked(loom, steps[h.index], decodes[h.index].max_tokens);
+        }
+      } catch (...) {
+        const auto failure = std::current_exception();
+        for (const auto& h : hosted)
+          steps[h.index].failure = failure;
       }
     }
     if (active.empty())
@@ -775,6 +901,69 @@ private:
     }
   }
 
+  static std::string Trimmed(std::string text) {
+    const auto space = [](unsigned char c) { return std::isspace(c) != 0; };
+    while (!text.empty() && space(text.back()))
+      text.pop_back();
+    std::size_t at = 0;
+    while (at < text.size() && space(text[at]))
+      ++at;
+    return text.substr(at);
+  }
+
+  // Whether the package's chat program writes a tool call the way Gufo's
+  // JSON grammar expects ("<tool_call>{"name": ..., "arguments": ...}"): render
+  // a placeholder call and read it back. Native XML, pythonic or special-token
+  // syntaxes differ, so their tool grammars stay off (the request is served
+  // unconstrained, as before).
+  bool ProbeJsonToolCalls() const {
+    try {
+      ext::ChatRequest request;
+      request.messages.emplace_back(ext::ChatRole::kUser, "Hi.");
+      ext::ChatMessage call(ext::ChatRole::kAssistant, "");
+      call.tool_calls.push_back(
+          {.id = "call_1",
+           .name = "qprobe",
+           .arguments = {{.name = "zz", .value = "7", .is_string = false}}});
+      request.messages.push_back(std::move(call));
+      ext::ChatMessage result(ext::ChatRole::kTool, "ok");
+      result.tool_call_id = "call_1";
+      request.messages.push_back(std::move(result));
+      request.tools.push_back({.name = "qprobe",
+                               .description = "probe",
+                               .parameters_json =
+                                   "{\"type\":\"object\",\"properties\":{\"zz\":"
+                                   "{\"type\":\"integer\"}}}"});
+      const auto body = ChatBody(model_->info().model_id, request);
+      std::vector<std::int32_t> tokens(model_->info().context_capacity);
+      std::size_t count = 0;
+      if (loom_text_embed_chat_prepare(model_->embed(), body.data(),
+                                       body.size(), tokens.data(),
+                                       tokens.size(), &count, nullptr) != 0)
+        return false;
+      tokens.resize(count);
+      const std::string text = DecodeLocked(tokens);
+      const auto name = text.rfind("qprobe");
+      if (name == std::string::npos)
+        return false;
+      // The last occurrence is inside the rendered call (the tool list comes
+      // first): look just before it for the JSON call head.
+      const std::size_t from = name > 96 ? name - 96 : 0;
+      const std::string head = text.substr(from, name - from);
+      const auto open = head.rfind("<tool_call>");
+      if (open == std::string::npos ||
+          head.find("<function", open) != std::string::npos)
+        return false;
+      const std::string after = Trimmed(head.substr(open + 11));
+      const std::string tail =
+          text.substr(name, std::min<std::size_t>(160, text.size() - name));
+      return after.rfind("{", 0) == 0 && after.find("\"name\"") != std::string::npos &&
+             tail.find("\"arguments\"") != std::string::npos;
+    } catch (const std::exception&) {
+      return false;
+    }
+  }
+
   // Releases the request's grammar once: the package samples on device, so
   // Gufo's token masks cannot apply; the package's parser reads the output.
   static void Unconstrain(LoomState& loom, sampling::SamplerState& sampler) {
@@ -793,14 +982,85 @@ private:
     loom.slot->stale = false;
     ++loom.slot->generation;
     loom.bound.clear();
+    loom.ResetHost();
   }
 
-  // Binds the request's sampling and consumes a deferred prompt token.
-  void PrepareLocked(LoomState& loom,
-                     const sampling::SamplingConfig& config) const {
+  // --------------------------------------------------- host sampling ---
+
+  [[nodiscard]] bool CanConstrain(const LoomState& loom) const {
+    return model_->logits().enabled && loom.context != nullptr &&
+           loom.context->constraint_ok;
+  }
+
+  // Controls the device sampler does not implement: they need the logit row.
+  [[nodiscard]] static bool StaticNeed(const sampling::SamplingConfig& config) {
+    return config.logprobs.has_value() || config.penalties_enabled() ||
+           config.min_p > 0.0F;
+  }
+
+  // Whether this request samples on the host when it needs to: logits are on
+  // and it has a grammar this package can take, or controls the device lacks.
+  bool HostedLocked(LoomState& loom,
+                    const sampling::SamplingConfig& config) const {
+    if (!loom.hosted_known) {
+      loom.hosted_known = true;
+      loom.hosted = model_->logits().enabled &&
+                    ((config.constraint != nullptr && CanConstrain(loom)) ||
+                     StaticNeed(config));
+    }
+    return loom.hosted;
+  }
+
+  // Whether the selection after `state` (the request's sampler with every
+  // consumed token accepted) must be chosen from the logit row. A lazy tool
+  // grammar admits everything until a call starts, so those requests run on
+  // the device until it restricts, then stay on the host.
+  bool NeedLocked(LoomState& loom, const sampling::SamplingConfig& config,
+                  sampling::SamplerState& state) const {
+    if (loom.sticky)
+      return true;
+    if (StaticNeed(config) ||
+        (config.constraint != nullptr && state.NeedsConstraintMask()))
+      loom.sticky = true;
+    return loom.sticky;
+  }
+
+  // Chooses the row's pending selection from its logit row with the request's
+  // sampler state (mask, penalties, min-p, seed). The draw's RNG state is kept
+  // so the real sampler, which has not drawn, continues the same stream.
+  void SampleNextLocked(LoomState& loom, sampling::SamplerState& state) const {
+    const std::size_t vocabulary = VocabularyLocked();
+    const std::size_t width = model_->logits().width;
+    loom.logits.assign(std::max(width, vocabulary), -3e38F);
+    std::size_t count = 0;
+    model_->Check(loom_text_embed_row_logits(model_->embed(), loom.row(),
+                                             loom.logits.data(), width, &count),
+                  "logits");
+    // Ids the head has no row for stay at the padding value; ids past the
+    // tokenizer are not tokens.
+    const std::span<const float> row(loom.logits.data(), vocabulary);
+    const auto token = state.Sample(row);
+    LoomState::HostNext next;
+    next.token = token;
+    next.stop = loom.stop_at_eos() &&
+                loom_text_embed_is_stop_token(model_->embed(),
+                                              static_cast<std::int32_t>(token));
+    next.rng = state.rng_state();
+    next.logprobs = sampling::CollectLogprobs(row, token, state.config().logprobs);
+    loom.next = std::move(next);
+  }
+
+  std::size_t VocabularyLocked() const {
+    return static_cast<std::size_t>(
+        loom_text_embed_vocabulary_size(model_->embed()));
+  }
+
+  // Binds the request's sampling (with the row's logits flag).
+  void BindLocked(LoomState& loom,
+                  const sampling::SamplingConfig& config) const {
     auto* embed = model_->embed();
-    EnsureExtentLocked(loom, 2);
-    std::string body = SamplingBody(model_->info().model_id, config);
+    std::string body = SamplingBody(model_->info().model_id, config,
+                                    loom.flag && model_->logits().enabled);
     if (body != loom.bound) {
       std::size_t count = 0;
       loom_text_embed_request_t* request = nullptr;
@@ -813,16 +1073,56 @@ private:
       model_->Check(status, "bind sampling");
       loom.bound = std::move(body);
     }
-    if (loom.slot->deferred >= 0) {
+  }
+
+  // Binds the request's sampling and consumes a deferred prompt token.
+  void PrepareLocked(LoomState& loom, sampling::SamplerState& sampler) const {
+    auto* embed = model_->embed();
+    // Without the logits capability (or a grammar this package's tokens can
+    // take) the package samples on device and its parser reads the output.
+    if (!CanConstrain(loom))
+      Unconstrain(loom, sampler);
+    EnsureExtentLocked(loom, 2);
+    const bool hosted = HostedLocked(loom, sampler.config());
+    const bool consuming = loom.slot->deferred >= 0;
+    // The epoch that consumes the prompt's last token makes the first
+    // selection: it leaves its logits when the host will pick it.
+    if (hosted && consuming)
+      loom.flag = NeedLocked(loom, sampler.config(), sampler);
+    BindLocked(loom, sampler.config());
+    if (consuming) {
       const std::int32_t token = static_cast<std::int32_t>(loom.slot->deferred);
       loom.slot->deferred = -1;
       model_->Check(loom_text_embed_row_prefill(embed, loom.row(), &token, 1),
                     "prefill");
+      if (hosted) {
+        if (loom.flag)
+          SampleNextLocked(loom, sampler);
+        else
+          loom.next.reset();
+      }
     }
   }
 
-  ext::TextDecodeSelection SelectionLocked(LoomState& loom) const {
+  // The row's pending selection: the host's when it chose one from the
+  // logits (the sampler then continues the draw's RNG stream), else the
+  // device's.
+  ext::TextDecodeSelection SelectionLocked(
+      LoomState& loom, sampling::SamplerState* sampler = nullptr) const {
     auto* embed = model_->embed();
+    if (loom.next) {
+      auto next = std::move(*loom.next);
+      loom.next.reset();
+      if (sampler != nullptr)
+        sampler->SetRngState(next.rng);
+      if (next.stop)
+        return {.stop = true,
+                .token = next.token,
+                .logprobs = std::move(next.logprobs)};
+      return {.token = next.token,
+              .piece = PieceLocked(loom, next.token),
+              .logprobs = std::move(next.logprobs)};
+    }
     const auto token = static_cast<TextRunnerToken>(
         loom_text_embed_row_token(embed, loom.row()));
     if (loom.stop_at_eos() && loom_text_embed_row_is_eos(embed, loom.row()))
@@ -832,6 +1132,10 @@ private:
 
   void AdvanceLocked(LoomState& loom, TextRunnerToken token) const {
     auto* embed = model_->embed();
+    // A forced token (reasoning budget) replaces whatever the host chose; the
+    // next selection comes from the device.
+    loom.next.reset();
+    loom.snapshot.reset();
     EnsureExtentLocked(loom, 2);
     if (loom.slot->deferred < 0 &&
         static_cast<TextRunnerToken>(
@@ -850,6 +1154,37 @@ private:
                     "advance");
     }
     CommitLocked(loom);
+  }
+
+  // Consumes the token the host chose (SelectNext/Advance flow): the epoch
+  // leaves the next logit row when the host needs it, and the host picks the
+  // next selection right away, as it would after a device selection.
+  void AdvanceHostedLocked(LoomState& loom, TextRunnerToken token) const {
+    auto* embed = model_->embed();
+    EnsureExtentLocked(loom, 2);
+    sampling::SamplerState probe(*loom.snapshot);
+    loom.snapshot.reset();
+    probe.Accept(static_cast<sampling::TokenId>(token));
+    loom.flag = NeedLocked(loom, probe.config(), probe);
+    BindLocked(loom, probe.config());
+    const std::uint32_t row = loom.row();
+    if (loom.slot->deferred < 0) {
+      const std::int32_t input = static_cast<std::int32_t>(token);
+      model_->Check(loom_text_embed_decode_batch_tokens(embed, &row, 1, &input),
+                    "decode");
+    } else {
+      const std::int32_t input[2] = {
+          static_cast<std::int32_t>(loom.slot->deferred),
+          static_cast<std::int32_t>(token)};
+      loom.slot->deferred = -1;
+      model_->Check(loom_text_embed_row_prefill(embed, row, input, 2),
+                    "advance");
+    }
+    CommitLocked(loom);
+    if (loom.flag)
+      SampleNextLocked(loom, probe);
+    else
+      loom.next.reset();
   }
 
   void CommitLocked(LoomState& loom) const {
@@ -918,7 +1253,9 @@ private:
       return;
     auto* embed = model_->embed();
     const bool eos =
-        loom.stop_at_eos() && loom_text_embed_row_is_eos(embed, loom.row());
+        loom.next ? loom.next->stop
+                  : loom.stop_at_eos() &&
+                        loom_text_embed_row_is_eos(embed, loom.row());
     const bool spent = step.selections.size() >= remaining;
     if (!eos && !spent)
       return;
@@ -1148,6 +1485,10 @@ private:
   mutable std::vector<std::int32_t> close_tokens_;
   std::size_t ram_cache_bytes_{0};
   std::optional<ImageLayout> images_;
+  // Logits load only: the package's raw reasoning markers are <think> ones,
+  // and its native tool calls are the JSON dialect Gufo's grammar writes.
+  bool reasoning_ok_{false};
+  bool json_tools_{false};
 
   // Host bytes the RAM tier may hold as images: --ram-cache, or room for a
   // few full-context images.

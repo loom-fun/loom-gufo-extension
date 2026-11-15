@@ -46,10 +46,37 @@ Design and evidence: `DESIGN.md`; validation clients and results: `validation/`.
 
 Options: `--loom-device URI`, `--loom-memory-bytes N`, `--loom-preset NAME`.
 
+## Logits: grammars, logprobs, min-p, penalties
+
+A package that declares `llm.logits` (regenerated with the loom-skills kit
+that carries the readback) can return the full logit row of its selections.
+`--loom-logits=auto` (default) loads such a package with the capability on;
+`on` requires it, `off` never uses it. A request that needs the row (a tool
+grammar from `tool_choice` required/named or strict tools, `response_format`
+json_schema, `logprobs`, `min_p`, repetition/frequency/presence penalties)
+marks its row `"logits": true` for the package, the runner reads the row after
+every selecting epoch and chooses the token with Gufo's own sampler, then
+feeds it back (`loom_text_embed_decode_batch_tokens`). Everything else, and
+every package without the capability, keeps the device path unchanged: the
+default epoch and decode speed are the ones of a load without the capability.
+
+- Grammars apply to the model's own tokens, so a package takes them only when
+  its raw reasoning markers are `<think>`/`</think>` and, for tools, its native
+  tool calls are the JSON dialect (`<tool_call>{"name": ..., "arguments":
+  {...}}</tool_call>`); the runner probes the chat program at load and logs
+  what it found (`loom: logits on ...`). Other packages serve those requests
+  unconstrained, as before; logprobs, min-p and penalties work for every
+  package with the capability.
+- A request with a grammar, or with controls the device sampler lacks, runs
+  undrafted (drafted packages lose the drafting speed-up for that request
+  only). A lazy tool grammar (`tool_choice` auto) stays on the device until a
+  call starts, then switches to the host for the rest of the request.
+- Logit rows cost device memory: `min(spans per epoch, rows) x vocabulary x 4`
+  bytes in the package's `outputs` allocation, only in a logits load.
+
 ## Limits
 
-- Needs logits from Loom (not exposed by packages yet): `tool_choice`
-  required/named, strict schemas, `response_format` enforcement, logprobs,
-  min_p and penalties. Tools and JSON work unconstrained, as in loom-serve.
 - Containers need `--security-opt seccomp=unconfined` for Loom's GPU memory
   reservation.
+- Tests of the runner's host sampling run without a GPU against a fake
+  `libloom_text_embed`: `GUFO=<gufo checkout> tests/build_test.sh`.
