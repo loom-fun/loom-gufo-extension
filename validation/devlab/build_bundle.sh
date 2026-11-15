@@ -10,7 +10,7 @@
 #
 # Writes OUT_DIR/gufo-loom-<gufo rev>-<ext rev>.tar.gz and its .sha256. First run builds
 # ROCm's LLVM (about 40 minutes, 24 cores); the Nix store lives in the docker
-# volume `loom-bundle-nix`, so later runs take minutes.
+# volume `loom-bundle-nix`, so later runs take minutes (about 8 with a warm volume).
 #
 # On the runner:  tar xzf bundle.tar.gz -C DIR && DIR/run-gufo.sh serve llm --model PKG ...
 # run-gufo.sh starts bin/gufo through the bundled loader and libraries, so the
@@ -27,8 +27,8 @@ gufo_rev=$(git -C "$gufo" rev-parse --short HEAD); ext_rev=$(git -C "$ext" rev-p
 name=gufo-loom-$gufo_rev-$ext_rev
 work=$(mktemp -d "${TMPDIR:-/var/tmp}/loom-bundle.XXXXXX")   # on disk, not tmpfs
 trap 'rm -rf "$work"' EXIT
-docker run --rm -v "$volume":/nix -v "$gufo":/src/gufo:ro -v "$ext":/ext:ro -v "$work":/out \
-  -v "$here":/recipe:ro -e TARGETS="$targets" -e NAME="$name" nixos/nix:latest sh /recipe/in_container.sh
+docker run --rm --name "loom-bundle-$$" -v "$volume":/nix -v "$gufo":/src/gufo:ro -v "$ext":/ext:ro -v "$work":/out \
+  -v "$here":/recipe:ro -e TARGETS="$targets" -e NAME="$name" -e OWNER="$(id -u):$(id -g)" nixos/nix:latest sh /recipe/in_container.sh
 tar -C "$work" -czf "$out/$name.tar.gz" "$name"
 (cd "$out" && sha256sum "$name.tar.gz" > "$name.tar.gz.sha256")
 echo "$out/$name.tar.gz"

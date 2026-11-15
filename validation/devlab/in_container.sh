@@ -19,7 +19,7 @@ XRT=$(nix build -L --no-link --print-out-paths /src/gufo#xrt-amdxdna 2>/dev/null
 echo "xrt: $XRT"
 nix-shell -E 'let f = builtins.getFlake "path:/src/gufo"; p = f.inputs.nixpkgs.legacyPackages.x86_64-linux; in p.mkShell { packages = with p; [ gcc cmake ninja pkg-config icu curl libpng libjpeg libwebp libopus openssl ffmpeg-headless libuuid libuuid.dev cargo rustc git patchelf coreutils findutils ]; }'  --run "
 set -eu
-export PKG_CONFIG_PATH_FOR_TARGET=$RT/lib/pkgconfig:\$PKG_CONFIG_PATH_FOR_TARGET   # the nix pkg-config wrapper reads this spelling
+export PKG_CONFIG_PATH_FOR_TARGET=$RT/lib/pkgconfig:\${PKG_CONFIG_PATH_FOR_TARGET:-} PKG_CONFIG_PATH=$RT/lib/pkgconfig:\${PKG_CONFIG_PATH:-}   # the nix pkg-config wrapper reads either spelling
 cmake /src/gufo -B /build/gufo -GNinja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF -DENGINE_ENABLE_HIP=OFF \
   -DXRT_DIR=$XRT/opt/xilinx/xrt/share/cmake/XRT -DGUFO_EXTENSIONS=loom -DGUFO_EXTENSION_DIRS=/ext
 cmake --build /build/gufo --target gufo --parallel 24
@@ -31,14 +31,19 @@ for f in \$dest/bin/gufo.real $RT/lib/libloom_text_embed.so; do
   ldd \$f | awk '/=> \\// {print \$3} /^[[:space:]]*\\/.*ld-linux/ {print \$1}'
 done | sort -u | while read -r lib; do cp -L \"\$lib\" \$dest/lib/; done
 cp -L $RT/lib/libloom_text_embed.so \$dest/lib/
+gcc -O1 -o \$dest/bin/embed_probe.real /ext/validation/devlab/embed_probe.c -I/ext/loom-embed -L$RT/lib -lloom_text_embed -lm
 chmod -R u+w \$dest
 loader=\$(ls \$dest/lib/ld-linux-x86-64.so.2)
-cat > \$dest/run-gufo.sh <<'EOS'
+cat > \$dest/run.sh <<'EOS'
 #!/bin/sh
-# gufo through the bundled loader and libraries (nothing from the host but the kernel driver).
+# run.sh PROGRAM ARGS...: bin/PROGRAM.real through the bundled loader and libraries (nothing from the host but the kernel driver).
 here=\$(cd \"\$(dirname \"\$0\")\" && pwd)
-exec \"\$here/lib/ld-linux-x86-64.so.2\" --library-path \"\$here/lib\" \"\$here/bin/gufo.real\" \"\$@\"
+prog=\$1; shift
+exec \"\$here/lib/ld-linux-x86-64.so.2\" --library-path \"\$here/lib\" \"\$here/bin/\$prog.real\" \"\$@\"
 EOS
-chmod +x \$dest/run-gufo.sh
+printf '#!/bin/sh\nexec \"\$(dirname \"\$0\")/run.sh\" gufo \"\$@\"\n' > \$dest/run-gufo.sh
+printf '#!/bin/sh\nexec \"\$(dirname \"\$0\")/run.sh\" embed_probe \"\$@\"\n' > \$dest/run-embed-probe.sh
+chmod +x \$dest/run.sh \$dest/run-gufo.sh \$dest/run-embed-probe.sh
 \$dest/run-gufo.sh --version | head -3
 "
+chown -R "$OWNER" /out
