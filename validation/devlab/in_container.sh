@@ -8,19 +8,26 @@ sandbox = false
 build-users-group =
 build-dir = /build
 accept-flake-config = true
+extra-substituters = https://gufo.cachix.org
+extra-trusted-public-keys = gufo.cachix.org-1:rfZe3n4lHINgyoACKzs5EthIZmBNvEyCCtufUpth0PE=
 EOF
 git config --global --add safe.directory '*'
 targets=$(for t in $TARGETS; do printf '"%s" ' "$t"; done)
 RT=$(nix build -L --impure --no-link --print-out-paths --expr \
   "((builtins.getFlake \"path:/src/gufo\").packages.x86_64-linux.loom-runtime.override { embed = /ext/loom-embed; gpuTargets = [ $targets ]; })")
 echo "loom-runtime: $RT"
-# gufo's configure needs the NPU runtime (XRT) even for a build without HIP
+# gufo's configure needs the NPU runtime (XRT)
 XRT=$(nix build -L --no-link --print-out-paths /src/gufo#xrt-amdxdna 2>/dev/null || nix build -L --no-link --print-out-paths "path:/src/gufo#xrt-amdxdna")
 echo "xrt: $XRT"
-nix-shell -E 'let f = builtins.getFlake "path:/src/gufo"; p = f.inputs.nixpkgs.legacyPackages.x86_64-linux; in p.mkShell { packages = with p; [ gcc cmake ninja pkg-config icu curl libpng libjpeg libwebp libopus openssl ffmpeg-headless libuuid libuuid.dev cargo rustc git patchelf coreutils findutils ]; }'  --run "
+# gufo's own build environment (ROCm HIP toolchain, patched ROCr, libraries, rust): the serve stack of this gufo is compiled only with the HIP
+# backend (ENGINE_ENABLE_HIP; a CPU-only gufo answers "HIP engine is disabled" at load), so the bundle's gufo is the real one. The loom
+# extension drives Loom's runtime through libloom_text_embed.so; the HIP backend is built for gfx1151 (its kernels are not used by the
+# extension, which loads no GGUF) and the bundle carries the runtime libraries it links.
+GUFO_SHELL='let f = builtins.getFlake "path:/src/gufo"; s = "x86_64-linux"; d = f.packages.${s}.default; p = f.inputs.nixpkgs.legacyPackages.${s}; in p.mkShell { inputsFrom = [ d ]; packages = with p; [ git patchelf coreutils findutils gcc ]; env = { GUFO_ROCR_LIBRARY_DIR = "${d.rocmRuntime}/lib"; HIP_CLANG = "${d.rocmPackages.llvm.clang}/bin/clang"; }; }'
+nix-shell -E "$GUFO_SHELL" --run "
 set -eu
 export PKG_CONFIG_PATH_FOR_TARGET=$RT/lib/pkgconfig:\${PKG_CONFIG_PATH_FOR_TARGET:-} PKG_CONFIG_PATH=$RT/lib/pkgconfig:\${PKG_CONFIG_PATH:-}   # the nix pkg-config wrapper reads either spelling
-cmake /src/gufo -B /build/gufo -GNinja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF -DENGINE_ENABLE_HIP=OFF \
+cmake /src/gufo -B /build/gufo -GNinja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF -DCMAKE_HIP_COMPILER=\$HIP_CLANG \
   -DXRT_DIR=$XRT/opt/xilinx/xrt/share/cmake/XRT -DGUFO_EXTENSIONS=loom -DGUFO_EXTENSION_DIRS=/ext
 cmake --build /build/gufo --target gufo --parallel 24
 dest=/out/$NAME; mkdir -p \$dest/bin \$dest/lib \$dest/validation

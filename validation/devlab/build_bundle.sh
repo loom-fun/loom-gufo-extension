@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Builds the DevLab bundle: a CPU-only gufo with the loom extension plus the
+# Builds the DevLab bundle: a gufo (HIP backend built: this gufo's serve stack exists only with it) with the loom extension plus the
 # libloom_text_embed.so it links, as one relocatable tarball (no GPU needed to
 # build; the GPU work is Loom's, in the library). Run on a dev box with Docker;
 # the toolchain is Nix inside the nixos/nix image, so nothing is installed.

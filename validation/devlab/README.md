@@ -4,13 +4,13 @@ How the Gufo logits checks run on a CI runner that has a GPU but no Nix or Docke
 the embed library for both GPUs is in loom-fun/gufo (`gpuTargets`, branch `logits-targets`).
 
 ## What runs where
-- **No Nix or Docker on the runner.** Everything is built on a dev box and shipped as one tarball (the bundle): a CPU-only
+- **No Nix or Docker on the runner.** Everything is built on a dev box and shipped as one tarball (the bundle): a gufo built with its HIP backend (a CPU-only gufo answers "HIP engine is disabled" at load: the serve stack is compiled only with it; the Nix closure comes from gufo.cachix.org, the build takes minutes)
   `gufo` with the loom extension, `libloom_text_embed.so` (Loom's text model layer, built inside hrx-system v0.1.0 for
   `gfx1151` and `gfx1201`), every shared library they need and the loader. `run.sh` starts a program through the bundled loader
   and libraries, so the runner contributes only the kernel (amdgpu driver, `/dev/kfd`, `/dev/dri/renderD*`) and Python 3.
-  The model work is Loom's (device code inside the embed library); gufo itself runs without HIP.
+  The model work is Loom's (device code inside the embed library); gufo's own HIP kernels are not used by the extension.
 - **Two programs, two levels.**
-  1. `run.sh embed_probe PACKAGE [STEPS] [ROWS]` (no Gufo, seconds): opens the package with logits on and ROWS resident rows,
+  1. `run.sh embed_probe PACKAGE [STEPS] [ROWS] [PRESET]` (no Gufo, seconds): opens the package with logits on and ROWS resident rows,
      decodes all rows in one epoch per step and checks for every row and step that `argmax(exported row) == the token the device
      selected` (greedy request), that padding is never the argmax, that feeding the host's token (`decode_batch_tokens`) and the
      device's own (`decode_batch`) alternately agree, and that a request without `"logits": true` leaves no row. Prints one JSON
@@ -47,7 +47,7 @@ if [ ! -x "$B/run.sh" ]; then
     && echo "$BUNDLE_SHA256  $WORK/bundle.tgz" | sha256sum -c - && tar xzf "$WORK/bundle.tgz" -C "$B" --strip-components=1
 fi
 "$SV/stop.sh" ...                          # the job's loom-serve must be stopped: one process owns the GPU memory budget
-"$B/run-embed-probe.sh" "$PKG" 24 3 | tee "$out/logits_$V.json"            # logits:V
+"$B/run-embed-probe.sh" "$PKG" 24 3 "$PRESET" | tee "$out/logits_$V.json"            # logits:V
 BUNDLE=$B "$B/validation/devlab/run_conformance.sh" "$PKG" "$out/gufo_$V"  # gufo:V
 ```
 - Budget: `embed_probe` loads the package once (JIT of its programs, as loom-serve does); the Gufo run loads it again with 4 rows.

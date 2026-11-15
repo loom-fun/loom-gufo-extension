@@ -50,7 +50,7 @@ static loom_text_embed_request_t* prepare(loom_text_embed_t* e, const char* mode
 
 int main(int argc, char** argv) {
   if (argc < 2) {
-    fprintf(stderr, "usage: embed_probe PACKAGE_DIR [STEPS] [ROWS]\n");
+    fprintf(stderr, "usage: embed_probe PACKAGE_DIR [STEPS] [ROWS] [PRESET]\n");
     return 2;
   }
   const int steps = argc > 2 ? atoi(argv[2]) : 24;
@@ -67,6 +67,7 @@ int main(int argc, char** argv) {
   options.struct_size = sizeof(options);
   options.base.model_path = argv[1];
   options.base.rows = (uint32_t)rows;
+  if (argc > 4 && argv[4][0]) options.base.preset = argv[4];   // a card with several presets needs one named (loom: "select a preset explicitly")
   options.logits = 1;
   loom_text_embed_t* e = NULL;
   if (loom_text_embed_open_ex(&options, &e, error, sizeof(error))) {
