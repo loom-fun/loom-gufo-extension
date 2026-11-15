@@ -552,6 +552,54 @@ LOOM_TEXT_EMBED_EXPORT void loom_text_embed_info(
                    : 0;
 }
 
+// Removes the top-level `"logits": <value>` member from the request body (in place; the body is a NUL-terminated copy owned by the request).
+// This loom (hrx-system v0.1.0) validates the top-level chat fields against a closed set and rejects `logits` ("unsupported chat field"),
+// while the flag is the embed layer's own: it is applied to the bound sampling record instead (loom_text_embed_apply_logits_flag).
+static void loom_text_embed_strip_logits(char* body, size_t* size, iree_string_view_t value) {
+  if (!value.data || value.data < body || value.data + value.size > body + *size) return;
+  char* end = (char*)value.data + value.size;
+  char* key_end = (char*)value.data;
+  while (key_end > body && isspace((unsigned char)key_end[-1])) --key_end;
+  if (key_end == body || key_end[-1] != ':') return;
+  --key_end;
+  while (key_end > body && isspace((unsigned char)key_end[-1])) --key_end;
+  static const char kKey[] = "\"logits\"";
+  const size_t key_length = sizeof(kKey) - 1;
+  if ((size_t)(key_end - body) < key_length || memcmp(key_end - key_length, kKey, key_length) != 0) return;
+  char* start = key_end - key_length;
+  char* tail = end;
+  while (tail < body + *size && isspace((unsigned char)*tail)) ++tail;
+  if (tail < body + *size && *tail == ',') {
+    end = tail + 1;                               // a following comma goes with the member
+    while (end < body + *size && isspace((unsigned char)*end)) ++end;
+  } else {
+    char* before = start;
+    while (before > body && isspace((unsigned char)before[-1])) --before;
+    if (before > body && before[-1] == ',') start = before - 1;   // else the preceding comma
+  }
+  memmove(start, end, (size_t)(body + *size - end) + 1);
+  *size -= (size_t)(end - start);
+}
+
+// Sets bit 30 of the bound sampling record's top_k (control.loom: the per-span export flag of the package). The record the package
+// returned is replaced by a patched copy (it is 16 bytes: temperature, top_p, top_k, seed/nonce).
+static iree_status_t loom_text_embed_apply_logits_flag(loom_text_embed_t* embed, loom_text_embed_request_t* request) {
+  iree_vm_buffer_t* options = request->chat.options;
+  if (!options) return iree_ok_status();
+  iree_const_byte_span_t span;
+  IREE_RETURN_IF_ERROR(iree_vm_buffer_map_read(options, 0, 4 * sizeof(uint32_t), &span));
+  uint32_t record[4];
+  memcpy(record, span.data, sizeof(record));
+  record[2] |= 0x40000000u;
+  iree_vm_buffer_t* patched = NULL;
+  IREE_RETURN_IF_ERROR(iree_vm_buffer_clone(IREE_VM_BUFFER_ACCESS_FLAG_READ,
+                                            iree_make_const_byte_span(record, sizeof(record)), 1, embed->allocator,
+                                            &patched));
+  iree_vm_buffer_release(options);
+  request->chat.options = patched;
+  return iree_ok_status();
+}
+
 LOOM_TEXT_EMBED_EXPORT int loom_text_embed_chat_prepare(
     loom_text_embed_t* embed, const char* body, size_t body_size,
     int32_t* tokens, size_t capacity, size_t* out_count,
@@ -577,6 +625,7 @@ LOOM_TEXT_EMBED_EXPORT int loom_text_embed_chat_prepare(
         &value);
     if (iree_status_is_ok(lookup)) {
       request->logits = value.data && iree_string_view_equal(value, IREE_SV("true"));
+      loom_text_embed_strip_logits(request->body, &body_size, value);
     } else {
       iree_status_ignore(lookup);
     }
@@ -587,6 +636,10 @@ LOOM_TEXT_EMBED_EXPORT int loom_text_embed_chat_prepare(
       loom_serve_text_model_chat_policy(embed->model), configuration->name,
       iree_make_string_view(request->body, body_size), ++embed->request_serial,
       /*default_max_tokens=*/1, embed->allocator, &request->chat);
+  if (iree_status_is_ok(status) && request->logits) {
+    status = loom_text_embed_apply_logits_flag(embed, request);
+    if (!iree_status_is_ok(status)) loom_serve_text_chat_deinitialize(&request->chat);
+  }
   if (iree_status_is_ok(status)) {
     loom_serve_text_media_span_t* media = NULL;
     iree_host_size_t media_count = 0;
