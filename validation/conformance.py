@@ -190,7 +190,7 @@ def _():
     calls = r["choices"][0]["message"].get("tool_calls") if s == 200 else None
     ok = bool(calls) and calls[0]["function"]["name"] == "get_weather"
     check("tool_choice required", needs_logits(ok, ""),
-          f"call made: {bool(calls)}" + ("" if ok else "; constrained decoding needs logits"))
+          f"call made: {bool(calls)}" + ("" if ok else f"; constrained decoding needs logits (HTTP {s}: {str(r)[:200]})"))
 
 
 @guarded("tool_choice named")
@@ -203,7 +203,7 @@ def _():
     calls = r["choices"][0]["message"].get("tool_calls") if s == 200 else None
     ok = bool(calls) and all(c["function"]["name"] == "get_time" for c in calls)
     check("tool_choice named", needs_logits(ok, ""),
-          f"calls={[c['function']['name'] for c in calls] if calls else None}" + ("" if ok else "; needs logits"))
+          f"calls={[c['function']['name'] for c in calls] if calls else None}" + ("" if ok else f"; needs logits (HTTP {s}: {str(r)[:200]})"))
 
 
 @guarded("strict tool schema")
@@ -220,7 +220,7 @@ def _():
     except Exception:
         mode = None
     check("strict tool schema", needs_logits(mode in ("eco", "boost", "idle"), ""),
-          f"mode={mode!r}" + ("" if mode in ("eco", "boost", "idle") else "; enum not enforced (needs logits)"))
+          f"mode={mode!r}" + ("" if mode in ("eco", "boost", "idle") else f"; enum not enforced (needs logits) (HTTP {s}: {str(r)[:200]})"))
 
 
 @guarded("response_format json_schema")
