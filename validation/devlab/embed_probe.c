@@ -120,8 +120,11 @@ int main(int argc, char** argv) {
       const int top = argmax(logits, n);
       const int device = loom_text_embed_row_token(e, (uint32_t)r);
       ++checked;
-      if (top == device) ++host_equals_device;
-      CHECK(top == device, "step %d row %d: argmax(row)=%d (%.3f) but the device selected %d (%.3f)", step, r, top,
+      // A tie of the row's maximum (bf16 logits repeat values: Qwen2.5-32B step 10, both GPUs) is any of the tied tokens: the device and
+      // argmax() may break it differently.
+      const int tied = device >= 0 && (size_t)device < n && logits[device] == logits[top];
+      if (top == device || tied) ++host_equals_device;
+      CHECK(top == device || tied, "step %d row %d: argmax(row)=%d (%.3f) but the device selected %d (%.3f)", step, r, top,
             logits[top], device, device >= 0 && (size_t)device < n ? logits[device] : -1.0f);
       if (top >= vocabulary) ++padding_hits;
       CHECK(top < vocabulary || vocabulary <= 0, "step %d row %d: argmax %d is padding (vocabulary %d)", step, r, top,
