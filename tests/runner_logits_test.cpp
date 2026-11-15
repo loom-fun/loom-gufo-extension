@@ -83,7 +83,13 @@ public:
       if (step.failure)
         std::rethrow_exception(step.failure);
       for (auto& selection : step.selections) {
-        sampler.Accept(selection.token);
+        try {
+          sampler.Accept(selection.token);
+        } catch (const std::exception& error) {
+          std::cerr << "accept failed after '" << run.text << "' token " << selection.token << " ('"
+                    << selection.piece << "'): " << error.what() << "\n";
+          throw;
+        }
         run.tokens.push_back(static_cast<int>(selection.token));
         run.logprobs.push_back(selection.logprobs);
         run.text += selection.piece;
@@ -310,6 +316,7 @@ void TestToolChoiceRequired() {
   config.constraint = f.runner->BindConstraint(grammar);
   ext::ChatRequest request = Fixture::DefaultRequest();
   request.tools.push_back({.name = "get_weather", .parameters_json = R"({"type":"object"})"});
+  request.tool_choice = ext::ChatRequest::ToolChoice::kRequired;
   const auto run = f.Generate(0, config, 120, request);
   CHECK(run.text.rfind("<tool_call>", 0) == 0, "starts with the call marker: " + run.text);
   CHECK(run.text.find("get_weather") != std::string::npos);
@@ -378,6 +385,7 @@ void TestDialectGating() {
   config.constraint = f.runner->BindConstraint(grammar);
   ext::ChatRequest request = Fixture::DefaultRequest();
   request.tools.push_back({.name = "get_weather", .parameters_json = R"({"type":"object"})"});
+  request.tool_choice = ext::ChatRequest::ToolChoice::kRequired;
   const auto run = f.Generate(0, config, 10, request);
   CHECK(run.epochs_host == 0, "unconstrained: the device path serves it");
   // The same package still honours logprobs on a tools request.

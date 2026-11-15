@@ -88,9 +88,13 @@ public:
   // SelectNext's sampler, for the Advance that follows it.
   std::unique_ptr<sampling::SamplerState> snapshot;
   std::vector<float> logits;
+  // The last raw bytes the request wrote: a lazy tool grammar restricts only
+  // once the call marker is in it.
+  std::string tail;
 
   void ResetHost() {
     flag = sticky = hosted = hosted_known = false;
+    tail.clear();
     next.reset();
     snapshot.reset();
   }
@@ -295,6 +299,9 @@ public:
     context->opens_reasoning = OpensReasoningLocked(tokens);
     context->constraint_ok = model_->logits().enabled && reasoning_ok_ &&
                              (request.tools.empty() || json_tools_);
+    context->lazy_tools = !request.tools.empty() && !request.response_format &&
+                          request.tool_choice ==
+                              ext::ChatRequest::ToolChoice::kAuto;
     if (request.reasoning.budget_tokens && !close_tokens_.empty())
       context->reasoning_budget = request.reasoning.budget_tokens;
     if (const std::size_t media = loom_text_embed_request_media(handle, nullptr,
@@ -1019,8 +1026,19 @@ private:
                   sampling::SamplerState& state) const {
     if (loom.sticky)
       return true;
-    if (StaticNeed(config) ||
-        (config.constraint != nullptr && state.NeedsConstraintMask()))
+    if (StaticNeed(config)) {
+      loom.sticky = true;
+      return true;
+    }
+    if (config.constraint == nullptr)
+      return false;
+    // A lazy tool grammar admits the whole vocabulary until the call marker
+    // is complete; computing its mask (a walk over the vocabulary) every step
+    // would tax every tool request, so look at the text first.
+    if (loom.context != nullptr && loom.context->lazy_tools &&
+        loom.tail.find("<tool_call>") == std::string::npos)
+      return false;
+    if (state.NeedsConstraintMask())
       loom.sticky = true;
     return loom.sticky;
   }
@@ -1206,6 +1224,9 @@ private:
                                                raw.data(), raw.size(), &size),
                   "decode");
     raw.resize(size);
+    loom.tail += raw;
+    if (loom.tail.size() > 64)
+      loom.tail.erase(0, loom.tail.size() - 64);
     loom.piece_key = key;
     loom.piece = OutputLocked(loom, raw, false);
     // The prompt opened reasoning and the model closed it at once: the

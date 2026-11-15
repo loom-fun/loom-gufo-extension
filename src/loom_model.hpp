@@ -263,6 +263,9 @@ public:
   // reasoning markers and (when the request declares tools) its native
   // tool-call syntax are the ones Gufo's grammars are written for.
   bool constraint_ok{false};
+  // The request declares tools with tool_choice auto and no response format:
+  // its grammar is lazy, free until the call marker has been written.
+  bool lazy_tools{false};
   [[nodiscard]] bool has_images() const { return !images.empty(); }
 };
 
