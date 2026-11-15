@@ -7,8 +7,8 @@
 // speaks in llm_config.json (the generator's input, shipped in the package):
 // chat.call_format, chat.think_open / think_end. This file maps those to
 // Gufo's JsonConstraint::ToolSyntax and to the reasoning markers a grammar
-// uses; a format Gufo's descriptors cannot express (pythonic calls, ATEM)
-// has no syntax, and its tool requests stay unconstrained.
+// uses; a package without tool calls has no syntax, and its tool requests stay
+// unconstrained.
 #ifndef GUFO_LOOM_DIALECT_HPP_
 #define GUFO_LOOM_DIALECT_HPP_
 
@@ -36,6 +36,9 @@ struct NativeDialect {
   // lives in its `final` channel.
   std::string after_reasoning;
   std::string answer_channel;
+  // Glimmer's channel format: the reasoning markers above are the ones the
+  // output carries after the generation prompt.
+  bool atem{false};
 };
 
 // `chat` is the "chat" object of the package's llm_config.json.
@@ -108,13 +111,61 @@ inline NativeDialect NativeDialectOf(const json::Value& chat) {
         .close = "}",
         .name_delimiters = "\"",
     };
+  } else if (format == "pythonic") {
+    // LFM2: <|tool_call_start|>[NAME(k='v', n=3), OTHER()]<|tool_call_end|>
+    // One list holds every call (chat.calls_open ... chat.calls_close); the
+    // arguments are Python keyword arguments (see ValueSyntax::keyword_root).
+    dialect.tools = Syntax{
+        .open = chat.member_str("calls_open", "<|tool_call_start|>["),
+        .name_suffix = "(",
+        .close = ")",
+        .call_separator = chat.member_str("call_separator", ", "),
+        .block_close = chat.member_str("calls_close", "]<|tool_call_end|>"),
+        .name_delimiters = "( ",
+        .values = {.string_open = "'",
+                   .string_close = "'",
+                   .keyword_root = true},
+    };
+  } else if (format == "atem") {
+    // Glimmer's channel format. After the generation prompt (<|start|>assistant)
+    // a call is addressed to its function and written as an XML block that
+    // names the function again; the next call opens a new message:
+    //   to=NAME<|message|><atem:function_calls>\n<atem:invoke name="NAME">\n
+    //   <atem:parameter name="K">V</atem:parameter>\n</atem:invoke>\n</atem:function_calls>
+    //   <|eom|><|start|>assistant to=NEXT<|message|>...
+    // Reasoning is `to=self<|message|>...` and ends where the next message
+    // header starts, so the grammar's reasoning close is the header's start.
+    dialect.tools = Syntax{
+        .open = " to=",
+        .name_suffix = "<|message|>",
+        .repeat_prefix = "<atem:function_calls>\n<atem:invoke name=\"",
+        .repeat_suffix = "\">\n",
+        .close = "</atem:invoke>\n</atem:function_calls>",
+        .call_separator = "<|eom|><|start|>assistant",
+        .name_delimiters = "<\" ",
+        .tagged =
+            sampling::JsonConstraint::TaggedArguments{
+                .parameter_open = "<atem:parameter name=\"",
+                .raw_value_open = "\">",
+                .typed_value_open = "\">",
+                .value_close = "</atem:parameter>\n",
+            },
+    };
+    dialect.atem = true;
   }
-  // pythonic (LFM2: [name(k='v')]), atem (Glimmer) and none (no tool calls):
-  // no descriptor.
+  // none (no tool calls): no descriptor.
   const std::string open = chat.member_str("think_open");
   if (chat.member_str("thinking", "never") != "never" && !open.empty()) {
     dialect.reasoning_open = open;
     dialect.reasoning_close = chat.member_str("think_end", "</think>");
+    if (dialect.atem) {
+      // The prompt ends in "<|start|>assistant": the model's output continues
+      // with the recipient. Reasoning is addressed to self and ends at the next
+      // message header, which a tool call or the answer continues.
+      dialect.reasoning_open = " to=self<|message|>";
+      dialect.reasoning_close = "<|start|>assistant";
+      dialect.answer_channel = " to=user<|message|>";
+    }
   }
   return dialect;
 }

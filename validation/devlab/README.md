@@ -65,7 +65,7 @@ BUNDLE=$B "$B/validation/devlab/run_conformance.sh" "$PKG" "$out/gufo_$V"  # guf
 | `open: ... has no logits region` | allocation layout differs from the embed's reader (offset 32768, slots = min(spans, rows)): kit/embed disagree |
 | embed_probe: `argmax(row)` != device token at some step/row | export kernel or slot index wrong (look at the first failing step/row: row 0 failing = kernel, row k only = slot stride) |
 | embed_probe: argmax is padding | `vocab` of the head vs the row width, or a stale row (export skipped) |
-| conformance `tool_choice required` fail, others pass | the package's native tool-call dialect is not Gufo's JSON one (gufo.log: `native tool calls differ`): expected for XML/pythonic dialects, grammars stay off for that package |
+| conformance `tool_choice required` fail, others pass | the package's native tool-call dialect is not Gufo's JSON one (gufo.log: `native tool calls differ`): a package with no tool-call dialect (`call_format` none) or an old package without `llm_config.json` and no JSON dialect: grammars stay off for it |
 | conformance reasoning checks fail with `--logits` only | the package's raw reasoning markers are not `<think>`; grammars should have stayed off (`reasoning markers differ` in gufo.log): runner bug if it did not |
 | everything slow | a logits load keeps `+min(spans, rows) x vocab x 4` bytes; `--loom-logits=off` is the control for any timing question |
 

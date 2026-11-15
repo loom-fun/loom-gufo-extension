@@ -336,8 +336,14 @@ public:
     auto context = std::make_shared<LoomPromptContext>(model_, handle);
     tokens.resize(count);
     context->opens_reasoning = OpensReasoningLocked(tokens);
+    // Glimmer's call header (" to=NAME") starts like its answer header
+    // (" to=user"), so a lazy tool grammar cannot tell them apart: automatic
+    // tool use stays on the device, as it does for a package without a grammar.
+    const bool lazy_ambiguous =
+        native_.atem && request.tool_choice == ext::ChatRequest::ToolChoice::kAuto;
     context->constraint_ok = model_->logits().enabled && reasoning_ok_ &&
-                             (request.tools.empty() || native_.tools);
+                             (request.tools.empty() ||
+                              (native_.tools && !lazy_ambiguous));
     if (native_.tools)
       context->lazy_open = native_.tools->open;
     context->lazy_tools = !request.tools.empty() && !request.response_format &&

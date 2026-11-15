@@ -110,8 +110,10 @@ has to leave the logits somewhere the embed layer can read.
   markup the runner publishes, so the runner describes the model's spelling to Gufo (`ToolGrammarSyntax` and
   `ReasoningGrammarMarkers`, a small addition to the text runner contract in loom-fun/gufo): the package's
   `llm_config.json` names its tool-call format and reasoning markers and `src/loom_dialect.hpp` maps them
-  to Gufo's `ToolSyntax` (Qwen XML, Hermes JSON, GLM tags, Gemma 4, OpenAI harmony and Llama JSON; pythonic and
-  ATEM calls cannot be spelled and stay unconstrained). Parsing of the published markup is unchanged.
+  to Gufo's `ToolSyntax` (Qwen XML, Hermes JSON, GLM tags, Gemma 4, OpenAI harmony, Llama JSON, Python-style call
+  lists with keyword arguments, and Glimmer's ATEM messages; the last two use the descriptor's `block_close` /
+  `call_separator`, `ValueSyntax::keyword_root` and `repeat_prefix`/`repeat_suffix`). Parsing of the published
+  markup is unchanged.
 - **Tests.** `tests/build_test.sh` builds the runner against a fake embed
   library (a byte-level model with scripted logits) and checks the device path
   is untouched, logprobs, penalties, min-p, seeds, JSON-schema and tool

@@ -63,8 +63,11 @@ default epoch and decode speed are the ones of a load without the capability.
 - Grammars constrain the model's own tokens, so they are written in the dialect the package speaks: its
   `llm_config.json` (shipped in the package) names the tool-call format and the reasoning markers, and
   `src/loom_dialect.hpp` maps them to Gufo's `ToolSyntax`: `qwen_xml`, `hermes`, `glm`, `gemma4`, `harmony`
-  (gpt-oss) and `json` (Llama) have a grammar; `pythonic` (LFM2), `atem` (Glimmer) and `none` do not, and their
-  tool requests stay unconstrained as before. Reasoning markers are the model's own (`<think>`, gemma's
+  (gpt-oss), `json` (Llama), `pythonic` (LFM2: one `[f(k='v'), g()]` list, keyword arguments) and `atem` (Glimmer:
+  one message per call, `to=NAME<|message|><atem:invoke name="NAME">`) have a grammar; `none` has no tool calls and
+  its tool requests stay unconstrained as before. Glimmer's automatic tool use (`tool_choice` auto) also stays on
+  the device: a call header (`to=NAME`) starts like the answer header (`to=user`), so a lazy grammar cannot tell
+  them apart; required, named and strict calls are constrained. Reasoning markers are the model's own (`<think>`, gemma's
   `<|channel>thought`, harmony's analysis channel). Response formats, logprobs, min-p and penalties work for
   every package with the capability. The runner logs what it found at load (`loom: logits on ...`). A package
   without `llm_config.json` is probed for the Hermes JSON dialect.

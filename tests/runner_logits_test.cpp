@@ -543,6 +543,11 @@ void TestDialects() {
        "<|channel|>commentary"},
       {"json", R"({"call_format":"json","call_arguments_key":"parameters","think_open":"","think_end":"</think>","thinking":"never"})",
        "{\"name\": \"get_weather\", \"parameters\": {\"city\": \"Paris\"}}", "{\"name\": \""},
+      {"pythonic", R"({"call_format":"pythonic","calls_open":"<|tool_call_start|>[","call_separator":", ","calls_close":"]<|tool_call_end|>","think_open":"<think>","think_end":"</think>","thinking":"always"})",
+       "<|tool_call_start|>[get_weather(city='Paris')]<|tool_call_end|>", "<|tool_call_start|>["},
+      {"atem", R"({"call_format":"atem","think_open":"<|start|>assistant to=self<|message|>","think_end":"<|start|>assistant to=user<|message|>","thinking":"always"})",
+       " to=get_weather<|message|><atem:function_calls>\n<atem:invoke name=\"get_weather\">\n<atem:parameter name=\"city\">Paris</atem:parameter>\n</atem:invoke>\n</atem:function_calls>",
+       " to="},
   };
   for (const auto& c : cases) {
     fake::reset();
@@ -595,13 +600,27 @@ void TestDialects() {
     if (markers && std::string(c.format) == "gemma4") {
       CHECK(markers->open == "<|channel>thought\n" && markers->close == "<channel|>");
     }
+    if (markers && std::string(c.format) == "pythonic") {
+      CHECK(markers->open == "<think>" && markers->close == "</think>");
+    }
+    if (markers && std::string(c.format) == "atem") {
+      // The prompt ends in <|start|>assistant: the output carries the rest of
+      // the reasoning header, and reasoning ends where the next header starts
+      // (a call continues it with " to=NAME", the answer with " to=user").
+      CHECK(markers->open == " to=self<|message|>", markers->open);
+      CHECK(markers->close == "<|start|>assistant", markers->close);
+      ext::ChatRequest with_format = request;
+      with_format.response_format = sampling::JsonConstraint::Object();
+      CHECK(f.runner->ReasoningGrammarMarkers(with_format)->close ==
+            "<|start|>assistant to=user<|message|>");
+    }
     if (markers && std::string(c.format) == "json") {
       CHECK(markers->open.empty(), "a package that never reasons has no reasoning phase");
     }
   }
-  // Formats Gufo's descriptors cannot spell: no grammar, the requests keep
-  // being served unconstrained.
-  for (const char* format : {"pythonic", "atem", "none"}) {
+  // A package without tool calls has no grammar, and its requests keep being
+  // served unconstrained.
+  for (const char* format : {"none"}) {
     fake::reset();
     fake::state().script = PeakScript;
     Fixture f(true, 2, std::string(R"({"call_format":")") + format + R"(","think_open":"<think>","think_end":"</think>","thinking":"toggle"})");
@@ -643,6 +662,18 @@ void TestDialectRendering() {
        "<|tool_call>call:get_weather{city:<|\"|>Paris<|\"|>,days:3,metric:true,opts:{x:1},tags:[<|\"|>a<|\"|>,<|\"|>b<|\"|>]}<tool_call|>"},
       {R"({"call_format":"harmony"})",
        "<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{\"city\":\"Paris\",\"days\":3,\"metric\":true,\"tags\":[\"a\",\"b\"],\"opts\":{\"x\":1}}<|call|>"},
+      // Python keyword arguments as the template prints them: strings quoted
+      // with ', True/False, containers as tojson.
+      {R"({"call_format":"pythonic"})",
+       "<|tool_call_start|>[get_weather(city='Paris', days=3, metric=True, tags=[\"a\", \"b\"], opts={\"x\": 1})]<|tool_call_end|>"},
+      // The same call with JSON spellings of the scalars, and compactly.
+      {R"({"call_format":"pythonic"})",
+       "<|tool_call_start|>[get_weather(city=\"Paris\",days=3,metric=true,tags=[\"a\",\"b\"],opts={\"x\":1})]<|tool_call_end|>"},
+      // Optional parameters left out, the others in the schema's order.
+      {R"({"call_format":"pythonic"})",
+       "<|tool_call_start|>[get_weather(city='Paris', metric=False)]<|tool_call_end|>"},
+      {R"({"call_format":"atem"})",
+       " to=get_weather<|message|><atem:function_calls>\n<atem:invoke name=\"get_weather\">\n<atem:parameter name=\"city\">Paris</atem:parameter>\n<atem:parameter name=\"days\">3</atem:parameter>\n<atem:parameter name=\"metric\">true</atem:parameter>\n<atem:parameter name=\"tags\">[\"a\", \"b\"]</atem:parameter>\n<atem:parameter name=\"opts\">{\"x\": 1}</atem:parameter>\n</atem:invoke>\n</atem:function_calls>"},
   };
   json::Value params = json::parse(
       R"({"type":"object","properties":{"city":{"type":"string"},"days":{"type":"integer"},"metric":{"type":"boolean"},"tags":{"type":"array","items":{"type":"string"}},"opts":{"type":"object","properties":{"x":{"type":"integer"}},"required":["x"],"additionalProperties":false}},"required":["city"],"additionalProperties":false})");
@@ -656,6 +687,106 @@ void TestDialectRendering() {
     const auto grammar = sampling::JsonConstraint::WithTools(nullptr, std::move(tools), true, false, *dialect.tools);
     CHECK(Accepts(*grammar, c.rendered), dialect.call_format + ": rendering accepted: " + c.rendered);
   }
+}
+
+// Several calls in one turn, in each dialect's own joining: Python's one list,
+// Glimmer's messages, and a call that has no parameters.
+void TestDialectParallelAndEdges() {
+  std::cerr << "dialects: parallel calls, empty arguments, argument failures\n";
+  json::Value params = json::parse(
+      R"({"type":"object","properties":{"city":{"type":"string"},"days":{"type":"integer"},"unit":{"type":"string","enum":["c","f"]}},"required":["city"],"additionalProperties":false})");
+  json::Value none = json::parse(R"({"type":"object","properties":{},"additionalProperties":false})");
+  auto build = [&](const sampling::JsonConstraint::ToolSyntax& syntax, bool parallel,
+                   bool required = true, bool strict = false) {
+    std::vector<sampling::JsonConstraint::Tool> tools;
+    tools.emplace_back("get_weather",
+                       sampling::JsonConstraint::ToolParameters(params, strict, syntax));
+    tools.emplace_back("get_time", sampling::JsonConstraint::ToolParameters(none, strict, syntax));
+    return sampling::JsonConstraint::WithTools(nullptr, std::move(tools), required, parallel, syntax);
+  };
+  const auto py = *NativeDialectOf(json::parse(R"({"call_format":"pythonic"})")).tools;
+  const auto atem = *NativeDialectOf(json::parse(R"({"call_format":"atem"})")).tools;
+  const std::string start = "<|tool_call_start|>[", end = "]<|tool_call_end|>";
+  {
+    const auto one = build(py, false);
+    const auto many = build(py, true);
+    CHECK(Accepts(*many, start + "get_weather(city='Paris'), get_time()" + end), "pythonic: two calls in one list");
+    CHECK(Accepts(*many, start + "get_time(), get_weather(city='A', days=2, unit='c'), get_time()" + end));
+    CHECK(Accepts(*many, start + "get_weather(city='Paris')" + end));
+    CHECK(Accepts(*many, start + "get_time()" + end), "pythonic: a call with no arguments");
+    CHECK(Accepts(*many, start + "get_weather(city=\"it's\")" + end), "pythonic: a double-quoted string may hold the quote");
+    CHECK(!Accepts(*one, start + "get_weather(city='Paris'), get_time()" + end), "pythonic: one call when parallel is off");
+    CHECK(Accepts(*one, start + "get_weather(city='Paris')" + end));
+    CHECK(!Accepts(*many, start + "get_weather(days=2)" + end), "pythonic: a required argument is required");
+    CHECK(!Accepts(*many, start + "get_weather(city='Paris', color='red')" + end), "pythonic: no unknown argument");
+    CHECK(!Accepts(*many, start + "get_weather(city='Paris', city='Rome')" + end), "pythonic: no repeated argument");
+    CHECK(!Accepts(*many, start + "get_weather(city='Paris', unit='k')" + end), "pythonic: enum respected");
+    CHECK(!Accepts(*many, start + "get_weather(city='Paris', days='3')" + end), "pythonic: integer respected");
+    CHECK(!Accepts(*many, start + "get_other()" + end), "pythonic: only the request's tools");
+    CHECK(!Accepts(*many, start + "get_weather(city='Paris')"), "pythonic: the list must close");
+    CHECK(!Accepts(*many, "get_weather(city='Paris')"), "pythonic: a required call has its markers");
+    CHECK(!Accepts(*many, start + "get_weather(city='Paris')" + end + "Done."), "pythonic: calls end the output");
+    // Strict tools need every argument written.
+    const auto strict_params = json::parse(
+        R"({"type":"object","properties":{"city":{"type":"string"},"days":{"type":"integer"}},"required":["city","days"],"additionalProperties":false})");
+    std::vector<sampling::JsonConstraint::Tool> tools;
+    tools.emplace_back("get_weather", sampling::JsonConstraint::ToolParameters(strict_params, true, py));
+    const auto strict = sampling::JsonConstraint::WithTools(nullptr, std::move(tools), true, false, py);
+    CHECK(Accepts(*strict, start + "get_weather(city='Paris', days=3)" + end), "pythonic strict: complete call");
+    CHECK(!Accepts(*strict, start + "get_weather(city='Paris')" + end), "pythonic strict: missing argument");
+    // A schema Python keywords cannot spell: a property named by a keyword
+    // argument must be an identifier; best effort falls back to any keywords.
+    const auto odd = json::parse(R"({"type":"object","properties":{"a-b":{"type":"string"}},"additionalProperties":false})");
+    bool strict_refused = false;
+    try {
+      (void)sampling::JsonConstraint::ToolParameters(odd, true, py);
+    } catch (const std::invalid_argument&) {
+      strict_refused = true;
+    }
+    CHECK(strict_refused, "pythonic strict: a property that is no identifier cannot be constrained");
+    std::vector<sampling::JsonConstraint::Tool> loose;
+    loose.emplace_back("f", sampling::JsonConstraint::ToolParameters(odd, false, py));
+    const auto open = sampling::JsonConstraint::WithTools(nullptr, std::move(loose), true, false, py);
+    CHECK(Accepts(*open, start + "f(x=1, y='z')" + end), "pythonic best effort: any keyword arguments");
+    CHECK(Accepts(*open, start + "f()" + end));
+    CHECK(!Accepts(*open, start + "f(1)" + end), "pythonic best effort: keywords only");
+  }
+  {
+    const std::string head = " to=get_weather<|message|><atem:function_calls>\n<atem:invoke name=\"get_weather\">\n";
+    const std::string weather = head + "<atem:parameter name=\"city\">Paris</atem:parameter>\n</atem:invoke>\n</atem:function_calls>";
+    const std::string time = " to=get_time<|message|><atem:function_calls>\n<atem:invoke name=\"get_time\">\n</atem:invoke>\n</atem:function_calls>";
+    const std::string next = "<|eom|><|start|>assistant";
+    const auto one = build(atem, false);
+    const auto many = build(atem, true);
+    CHECK(Accepts(*many, weather), "atem: a call");
+    CHECK(Accepts(*many, time), "atem: a call with no arguments");
+    CHECK(Accepts(*many, weather + next + time), "atem: the next call is a new message");
+    CHECK(Accepts(*many, time + next + weather + next + time));
+    CHECK(!Accepts(*one, weather + next + time), "atem: one call when parallel is off");
+    CHECK(!Accepts(*many, weather + time), "atem: calls are separate messages");
+    CHECK(!Accepts(*many, " to=get_time<|message|><atem:function_calls>\n<atem:invoke name=\"get_weather\">\n</atem:invoke>\n</atem:function_calls>"),
+          "atem: the invoke names the function the message is addressed to");
+    CHECK(!Accepts(*many, " to=user<|message|>Hello"), "atem: required refuses an answer");
+    CHECK(!Accepts(*many, head + "</atem:invoke>\n</atem:function_calls>"), "atem: a required argument is required");
+    CHECK(!Accepts(*many, head + "<atem:parameter name=\"color\">red</atem:parameter>\n</atem:invoke>\n</atem:function_calls>"),
+          "atem: no unknown argument");
+    CHECK(!Accepts(*many, weather + "<|eot|>"), "atem: the stop token is not text");
+  }
+  // Glimmer's call header starts like its answer header, so automatic tool
+  // use is not constrained (it stays on the device).
+  fake::reset();
+  fake::state().script = PeakScript;
+  Fixture f(true, 2, R"({"call_format":"atem","think_open":"<|start|>assistant to=self<|message|>","think_end":"<|start|>assistant to=user<|message|>","thinking":"always"})");
+  sampling::SamplingConfig config;
+  config.constraint = f.runner->BindConstraint(build(atem, true, false));
+  ext::ChatRequest request = Fixture::DefaultRequest();
+  request.tools.push_back({.name = "get_weather", .parameters_json = R"({"type":"object"})"});
+  const auto automatic = f.Generate(0, config, 6, request);
+  CHECK(automatic.epochs_host == 0, "atem: automatic tool use runs on the device");
+  request.tool_choice = ext::ChatRequest::ToolChoice::kRequired;
+  config.constraint = f.runner->BindConstraint(build(atem, true, true));
+  const auto required = f.Generate(0, config, 6, request);
+  CHECK(required.epochs_host > 0, "atem: a required call is constrained");
 }
 
 }  // namespace
@@ -674,6 +805,7 @@ int main() {
   TestSelectAdvance();
   TestDialects();
   TestDialectRendering();
+  TestDialectParallelAndEdges();
   if (g_failures) {
     std::cerr << g_failures << " failure(s)\n";
     return 1;
