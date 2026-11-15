@@ -34,13 +34,16 @@ struct Run {
 
 class Fixture {
 public:
-  explicit Fixture(bool logits = true, std::size_t rows = 2) {
+  explicit Fixture(bool logits = true, std::size_t rows = 2,
+                   const std::string& chat = {}) {
     dir_ = std::filesystem::temp_directory_path() /
            ("loom_runner_test_" + std::to_string(::getpid()));
     std::filesystem::create_directories(dir_);
     std::ofstream(dir_ / "model.json")
         << R"({"schema_version":1,"programs":{},"services":{"chat":{"kind":"text"}},)"
            R"("variants":{"v":{"services":{"chat":{"config":{"llm.card":true,"llm.logits":false}}}}}})";
+    if (!chat.empty())
+      std::ofstream(dir_ / "llm_config.json") << R"({"chat":)" << chat << "}";
     ext::ParsedOptions options;
     if (!logits)
       options["--loom-logits"] = std::string("off");
@@ -305,13 +308,13 @@ void TestToolChoiceRequired() {
   Fixture f;
   json::Value params = json::parse(
       R"({"type":"object","properties":{"city":{"type":"string"}},"required":["city"],"additionalProperties":false})");
+  const auto syntax = f.runner->ToolGrammarSyntax();
+  CHECK(syntax.has_value(), "the package has a native call grammar");
   std::vector<sampling::JsonConstraint::Tool> tools;
   tools.emplace_back("get_weather",
-                     sampling::JsonConstraint::ToolParameters(
-                         params, true, sampling::JsonConstraint::ToolFormat::kJson));
+                     sampling::JsonConstraint::ToolParameters(params, true, *syntax));
   auto grammar = sampling::JsonConstraint::WithTools(
-      nullptr, std::move(tools), true, false,
-      sampling::JsonConstraint::ToolFormat::kJson);
+      nullptr, std::move(tools), true, false, *syntax);
   sampling::SamplingConfig config;
   config.constraint = f.runner->BindConstraint(grammar);
   ext::ChatRequest request = Fixture::DefaultRequest();
@@ -330,13 +333,13 @@ void TestLazyGrammarStaysOnDevice() {
   Fixture f;
   json::Value params = json::parse(
       R"({"type":"object","properties":{"city":{"type":"string"}},"required":["city"],"additionalProperties":false})");
+  const auto syntax = f.runner->ToolGrammarSyntax();
+  CHECK(syntax.has_value(), "the package has a native call grammar");
   std::vector<sampling::JsonConstraint::Tool> tools;
   tools.emplace_back("get_weather",
-                     sampling::JsonConstraint::ToolParameters(
-                         params, true, sampling::JsonConstraint::ToolFormat::kJson));
+                     sampling::JsonConstraint::ToolParameters(params, true, *syntax));
   auto grammar = sampling::JsonConstraint::WithTools(
-      nullptr, std::move(tools), false, false,
-      sampling::JsonConstraint::ToolFormat::kJson);
+      nullptr, std::move(tools), false, false, *syntax);
   sampling::SamplingConfig config;
   config.constraint = f.runner->BindConstraint(grammar);
   ext::ChatRequest request = Fixture::DefaultRequest();
@@ -371,9 +374,10 @@ void TestDialectGating() {
   fake::state().tool_call_text =
       "<tool_call>\n<function=qprobe>\n<parameter=zz>\n7\n</parameter>\n</function>\n</tool_call>";
   Fixture f;
-  CHECK(!f.runner->NativeJsonTools());
+  CHECK(!f.runner->NativeToolGrammar());
   json::Value params = json::parse(
       R"({"type":"object","properties":{"city":{"type":"string"}},"required":["city"],"additionalProperties":false})");
+  CHECK(!f.runner->ToolGrammarSyntax().has_value(), "no native grammar for an unknown syntax");
   std::vector<sampling::JsonConstraint::Tool> tools;
   tools.emplace_back("get_weather",
                      sampling::JsonConstraint::ToolParameters(
@@ -488,6 +492,172 @@ void TestSelectAdvance() {
   CHECK(tokens == batch.tokens, "select/advance == batch");
 }
 
+
+// ---------------------------------------------------------------- dialects ---
+
+bool Accepts(const sampling::JsonConstraint& grammar, std::string_view text) {
+  auto state = grammar.Start();
+  for (const unsigned char byte : text) {
+    state = grammar.Advance(state, byte);
+    if (state.empty())
+      return false;
+  }
+  return grammar.Complete(state);
+}
+
+struct DialectCase {
+  const char* format;
+  const char* chat;     // the "chat" object of llm_config.json
+  const char* example;  // a call as the package's template writes it
+  const char* open;     // what a required call must start with
+};
+
+// The grammar of a required call, built as Gufo's ConstrainChatRequest does.
+std::shared_ptr<const sampling::JsonConstraint> RequiredCall(
+    const sampling::JsonConstraint::ToolSyntax& syntax) {
+  json::Value params = json::parse(
+      R"({"type":"object","properties":{"city":{"type":"string"}},"required":["city"],"additionalProperties":false})");
+  std::vector<sampling::JsonConstraint::Tool> tools;
+  tools.emplace_back("get_weather",
+                     sampling::JsonConstraint::ToolParameters(params, false, syntax));
+  return sampling::JsonConstraint::WithTools(nullptr, std::move(tools), true,
+                                             false, syntax);
+}
+
+void TestDialects() {
+  std::cerr << "dialects: native call syntax per package, from llm_config.json\n";
+  const DialectCase cases[] = {
+      {"qwen_xml", R"({"call_format":"qwen_xml","think_open":"<think>\n","think_end":"</think>","thinking":"toggle"})",
+       "<tool_call>\n<function=get_weather>\n<parameter=city>\nParis\n</parameter>\n</function>\n</tool_call>",
+       "<tool_call>"},
+      {"hermes", R"({"call_format":"hermes","think_open":"<think>\n","think_end":"</think>","thinking":"toggle"})",
+       "<tool_call>\n{\"name\": \"get_weather\", \"arguments\": {\"city\": \"Paris\"}}\n</tool_call>",
+       "<tool_call>"},
+      {"glm", R"({"call_format":"glm","think_open":"<think>","think_end":"</think>","thinking":"toggle"})",
+       "<tool_call>get_weather<arg_key>city</arg_key><arg_value>Paris</arg_value></tool_call>",
+       "<tool_call>"},
+      {"gemma4", R"({"call_format":"gemma4","think_open":"<|channel>thought\n","think_end":"<channel|>","thinking":"toggle"})",
+       "<|tool_call>call:get_weather{city:<|\"|>Paris<|\"|>}<tool_call|>", "<|tool_call>"},
+      {"harmony", R"({"call_format":"harmony","think_open":"<|channel|>analysis<|message|>","think_end":"<|end|>","thinking":"always"})",
+       "<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{\"city\":\"Paris\"}<|call|>",
+       "<|channel|>commentary"},
+      {"json", R"({"call_format":"json","call_arguments_key":"parameters","think_open":"","think_end":"</think>","thinking":"never"})",
+       "{\"name\": \"get_weather\", \"parameters\": {\"city\": \"Paris\"}}", "{\"name\": \""},
+  };
+  for (const auto& c : cases) {
+    fake::reset();
+    fake::state().script = PeakScript;
+    Fixture f(true, 2, c.chat);
+    const auto syntax = f.runner->ToolGrammarSyntax();
+    CHECK(syntax.has_value(), std::string(c.format) + ": a native grammar exists");
+    if (!syntax) continue;
+    const auto grammar = RequiredCall(*syntax);
+    CHECK(Accepts(*grammar, c.example), std::string(c.format) + ": the template's call is accepted");
+    CHECK(!Accepts(*grammar, "Plain text."), std::string(c.format) + ": required refuses prose");
+    CHECK(syntax->open == c.open, std::string(c.format) + ": open marker " + syntax->open);
+    // The host sampler writes a call in the dialect's spelling from a model
+    // that would write something else.
+    sampling::SamplingConfig config;
+    config.constraint = f.runner->BindConstraint(grammar);
+    ext::ChatRequest request = Fixture::DefaultRequest();
+    request.tools.push_back({.name = "get_weather", .parameters_json = R"({"type":"object"})"});
+    request.tool_choice = ext::ChatRequest::ToolChoice::kRequired;
+    // The model writes prose first; the grammar must turn it into the call.
+    // After its first bytes the script follows the template's call, so the
+    // run ends exactly when the grammar says the call is complete.
+    const std::string example = c.example;
+    const int base = static_cast<int>(f.runner->PreparePrompt(request)->tokens.size());
+    fake::state().script = [example, base](int last, int position, float* out) {
+      PeakScript(last, position, out);
+      const int index = position - base;
+      if (index >= 6 && index - 6 < static_cast<int>(example.size())) {
+        for (int v = 0; v < fake::kBytes; ++v) out[v] = -20.0F;
+        out[static_cast<unsigned char>(example[index - 6])] = 5.0F;
+      } else if (index - 6 >= static_cast<int>(example.size())) {
+        out[fake::kEos] = 50.0F;
+      }
+    };
+    const auto run = f.Generate(0, config, 400, request);
+    CHECK(run.text.find(c.open) != std::string::npos, std::string(c.format) + ": writes the call: " + run.text);
+    CHECK(Accepts(*grammar, run.text), std::string(c.format) + ": the generated call is complete: " + run.text);
+    CHECK(run.stopped, std::string(c.format) + ": ends at the stop token");
+    // Reasoning markers of the grammar are the model's own.
+    const auto markers = f.runner->ReasoningGrammarMarkers(request);
+    CHECK(markers.has_value());
+    if (markers && std::string(c.format) == "harmony") {
+      CHECK(markers->open == "<|channel|>analysis<|message|>");
+      CHECK(markers->close == "<|end|><|start|>assistant", markers->close);
+      ext::ChatRequest with_format = request;
+      with_format.response_format = sampling::JsonConstraint::Object();
+      CHECK(f.runner->ReasoningGrammarMarkers(with_format)->close ==
+            "<|end|><|start|>assistant<|channel|>final<|message|>");
+    }
+    if (markers && std::string(c.format) == "gemma4") {
+      CHECK(markers->open == "<|channel>thought\n" && markers->close == "<channel|>");
+    }
+    if (markers && std::string(c.format) == "json") {
+      CHECK(markers->open.empty(), "a package that never reasons has no reasoning phase");
+    }
+  }
+  // Formats Gufo's descriptors cannot spell: no grammar, the requests keep
+  // being served unconstrained.
+  for (const char* format : {"pythonic", "atem", "none"}) {
+    fake::reset();
+    fake::state().script = PeakScript;
+    Fixture f(true, 2, std::string(R"({"call_format":")") + format + R"(","think_open":"<think>","think_end":"</think>","thinking":"toggle"})");
+    CHECK(!f.runner->ToolGrammarSyntax().has_value(), std::string(format) + ": no tool grammar");
+    json::Value params = json::parse(R"({"type":"object"})");
+    sampling::SamplingConfig config;
+    config.constraint = f.runner->BindConstraint(sampling::JsonConstraint::Object());
+    ext::ChatRequest request = Fixture::DefaultRequest();
+    request.tools.push_back({.name = "get_weather", .parameters_json = R"({"type":"object"})"});
+    const auto with_tools = f.Generate(0, config, 6, request);
+    CHECK(with_tools.epochs_host == 0, std::string(format) + ": tools requests run on the device");
+    // A response format (no tools) still gets its grammar there.
+    ext::ChatRequest plain = Fixture::DefaultRequest();
+    const auto json_run = f.Generate(0, config, 6, plain);
+    CHECK(json_run.epochs_host > 0, std::string(format) + ": response_format grammar runs");
+  }
+}
+
+
+// Calls as the kit's chat_probe.render_call writes them for the packages'
+// templates (the same text the model sees in its history), with every kind of
+// argument: the grammar of each dialect must accept them.
+void TestDialectRendering() {
+  std::cerr << "dialects: the grammar accepts the template's own rendering\n";
+  struct Case {
+    const char* chat;
+    const char* rendered;
+  };
+  const Case cases[] = {
+      {R"({"call_format":"hermes"})",
+       "<tool_call>\n{\"name\": \"get_weather\", \"arguments\": {\"city\": \"Paris\", \"days\": 3, \"metric\": true, \"tags\": [\"a\", \"b\"], \"opts\": {\"x\": 1}}}\n</tool_call>"},
+      {R"({"call_format":"qwen_xml"})",
+       "<tool_call>\n<function=get_weather>\n<parameter=city>\nParis\n</parameter>\n<parameter=days>\n3\n</parameter>\n<parameter=metric>\ntrue\n</parameter>\n<parameter=tags>\n[\"a\",\"b\"]\n</parameter>\n<parameter=opts>\n{\"x\":1}\n</parameter>\n</function>\n</tool_call>"},
+      {R"({"call_format":"glm"})",
+       "<tool_call>get_weather<arg_key>city</arg_key><arg_value>Paris</arg_value><arg_key>days</arg_key><arg_value>3</arg_value><arg_key>metric</arg_key><arg_value>true</arg_value><arg_key>tags</arg_key><arg_value>[\"a\",\"b\"]</arg_value><arg_key>opts</arg_key><arg_value>{\"x\":1}</arg_value></tool_call>"},
+      {R"({"call_format":"json","call_arguments_key":"parameters"})",
+       "{\"name\": \"get_weather\", \"parameters\": {\"city\": \"Paris\", \"days\": 3, \"metric\": true, \"tags\": [\"a\", \"b\"], \"opts\": {\"x\": 1}}}"},
+      {R"({"call_format":"gemma4"})",
+       "<|tool_call>call:get_weather{city:<|\"|>Paris<|\"|>,days:3,metric:true,opts:{x:1},tags:[<|\"|>a<|\"|>,<|\"|>b<|\"|>]}<tool_call|>"},
+      {R"({"call_format":"harmony"})",
+       "<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{\"city\":\"Paris\",\"days\":3,\"metric\":true,\"tags\":[\"a\",\"b\"],\"opts\":{\"x\":1}}<|call|>"},
+  };
+  json::Value params = json::parse(
+      R"({"type":"object","properties":{"city":{"type":"string"},"days":{"type":"integer"},"metric":{"type":"boolean"},"tags":{"type":"array","items":{"type":"string"}},"opts":{"type":"object","properties":{"x":{"type":"integer"}},"required":["x"],"additionalProperties":false}},"required":["city"],"additionalProperties":false})");
+  for (const auto& c : cases) {
+    const auto dialect = NativeDialectOf(json::parse(c.chat));
+    CHECK(dialect.tools.has_value());
+    if (!dialect.tools) continue;
+    std::vector<sampling::JsonConstraint::Tool> tools;
+    tools.emplace_back("get_weather",
+                       sampling::JsonConstraint::ToolParameters(params, false, *dialect.tools));
+    const auto grammar = sampling::JsonConstraint::WithTools(nullptr, std::move(tools), true, false, *dialect.tools);
+    CHECK(Accepts(*grammar, c.rendered), dialect.call_format + ": rendering accepted: " + c.rendered);
+  }
+}
+
 }  // namespace
 
 int main() {
@@ -502,6 +672,8 @@ int main() {
   TestDialectGating();
   TestBatchMix();
   TestSelectAdvance();
+  TestDialects();
+  TestDialectRendering();
   if (g_failures) {
     std::cerr << g_failures << " failure(s)\n";
     return 1;

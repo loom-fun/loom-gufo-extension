@@ -29,6 +29,7 @@
 
 #include "loom_cache.hpp"
 #include "loom_chat.hpp"
+#include "loom_dialect.hpp"
 
 namespace gufo::loom {
 namespace {
@@ -153,17 +154,53 @@ public:
                  source);
     if (model_->logits().enabled) {
       // Host sampling applies Gufo's grammars to the model's own tokens, so
-      // they must be written in the dialect the model speaks.
-      reasoning_ok_ = close_tokens_.empty() ||
-                      Trimmed(DecodeLocked(close_tokens_)) == "</think>";
-      json_tools_ = ProbeJsonToolCalls();
+      // they must be written in the dialect the model speaks: the package
+      // names it (llm_config.json); an older package is probed for the one
+      // JSON dialect that can be recognized from its chat program.
+      if (model_->chat_config()) {
+        native_ = NativeDialectOf(*model_->chat_config());
+        reasoning_ok_ = true;
+      } else {
+        reasoning_ok_ = close_tokens_.empty() ||
+                        Trimmed(DecodeLocked(close_tokens_)) == "</think>";
+        if (ProbeJsonToolCalls())
+          native_.tools = NativeDialectOf(json::parse(
+                                              R"({"call_format":"hermes"})"))
+                              .tools;
+      }
       std::fprintf(stderr,
-                   "loom: logits on (%u floats per row); reasoning markers "
-                   "%s, native tool calls %s\n",
+                   "loom: logits on (%u floats per row); native tool calls: "
+                   "%s%s; reasoning markers: %s\n",
                    model_->logits().width,
-                   reasoning_ok_ ? "match" : "differ: grammars stay off",
-                   json_tools_ ? "match" : "differ: tool grammars stay off");
+                   native_.tools ? "grammar available" : "no grammar",
+                   native_.known
+                       ? (" (" + native_.call_format + ")").c_str()
+                       : " (probed)",
+                   !reasoning_ok_ ? "differ: grammars stay off"
+                   : native_.reasoning_open.empty()
+                       ? "none"
+                       : ("'" + native_.reasoning_open + "' ... '" +
+                          native_.reasoning_close + "'").c_str());
     }
+  }
+
+  // The grammar's view of the model's own tokens (see loom_dialect.hpp):
+  // only for a logits load, which is the only one with grammars.
+  [[nodiscard]] std::optional<sampling::JsonConstraint::ToolSyntax>
+  ToolGrammarSyntax() const override {
+    return model_->logits().enabled ? native_.tools : std::nullopt;
+  }
+
+  [[nodiscard]] std::optional<ReasoningMarkup> ReasoningGrammarMarkers(
+      const ext::ChatRequest& request) const override {
+    if (!model_->logits().enabled || !native_.known)
+      return std::nullopt;
+    if (native_.reasoning_open.empty())
+      return ReasoningMarkup{"", "</think>"};  // no reasoning phase
+    std::string close = native_.reasoning_close + native_.after_reasoning;
+    if (request.response_format)
+      close += native_.answer_channel;
+    return ReasoningMarkup{native_.reasoning_open, close};
   }
 
   [[nodiscard]] ext::TextRunnerDescriptor Descriptor() const override {
@@ -219,9 +256,11 @@ public:
     return plans;
   }
 
-  // Whether the package's native tool calls are the JSON dialect Gufo's
-  // grammar writes (logits load only).
-  [[nodiscard]] bool NativeJsonTools() const { return json_tools_; }
+  // Whether tool requests get a grammar in this package's own call syntax
+  // (logits load only).
+  [[nodiscard]] bool NativeToolGrammar() const {
+    return native_.tools.has_value();
+  }
 
   [[nodiscard]] bool IsStopToken(std::uint32_t id) const {
     std::lock_guard lock(model_->mutex());
@@ -298,7 +337,9 @@ public:
     tokens.resize(count);
     context->opens_reasoning = OpensReasoningLocked(tokens);
     context->constraint_ok = model_->logits().enabled && reasoning_ok_ &&
-                             (request.tools.empty() || json_tools_);
+                             (request.tools.empty() || native_.tools);
+    if (native_.tools)
+      context->lazy_open = native_.tools->open;
     context->lazy_tools = !request.tools.empty() && !request.response_format &&
                           request.tool_choice ==
                               ext::ChatRequest::ToolChoice::kAuto;
@@ -1036,7 +1077,7 @@ private:
     // is complete; computing its mask (a walk over the vocabulary) every step
     // would tax every tool request, so look at the text first.
     if (loom.context != nullptr && loom.context->lazy_tools &&
-        loom.tail.find("<tool_call>") == std::string::npos)
+        loom.tail.find(loom.context->lazy_open) == std::string::npos)
       return false;
     if (state.NeedsConstraintMask())
       loom.sticky = true;
@@ -1225,8 +1266,8 @@ private:
                   "decode");
     raw.resize(size);
     loom.tail += raw;
-    if (loom.tail.size() > 64)
-      loom.tail.erase(0, loom.tail.size() - 64);
+    if (loom.tail.size() > 160)
+      loom.tail.erase(0, loom.tail.size() - 160);
     loom.piece_key = key;
     loom.piece = OutputLocked(loom, raw, false);
     // The prompt opened reasoning and the model closed it at once: the
@@ -1506,10 +1547,10 @@ private:
   mutable std::vector<std::int32_t> close_tokens_;
   std::size_t ram_cache_bytes_{0};
   std::optional<ImageLayout> images_;
-  // Logits load only: the package's raw reasoning markers are <think> ones,
-  // and its native tool calls are the JSON dialect Gufo's grammar writes.
+  // Logits load only: the model's own call syntax and reasoning markers, and
+  // whether grammars may run around its reasoning at all.
+  NativeDialect native_;
   bool reasoning_ok_{false};
-  bool json_tools_{false};
 
   // Host bytes the RAM tier may hold as images: --ram-cache, or room for a
   // few full-context images.

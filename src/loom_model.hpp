@@ -140,6 +140,7 @@ public:
     }
     loom_text_embed_info(embed_, &info_);
     loom_text_embed_logits_info(embed_, &logits_);
+    chat_config_ = LoadChatConfig(path);
     fingerprint_ = PackageFingerprint(path, preset);
   }
   ~LoomModel() {
@@ -151,6 +152,11 @@ public:
   LoomModel& operator=(const LoomModel&) = delete;
 
   [[nodiscard]] const loom_text_embed_info_t& info() const { return info_; }
+  // The "chat" object of the package's llm_config.json (the generator's input,
+  // shipped in the package), when it has one.
+  [[nodiscard]] const std::optional<json::Value>& chat_config() const {
+    return chat_config_;
+  }
   // The logits capability of this load (enabled: rows can be read).
   [[nodiscard]] const loom_text_embed_logits_info_t& logits() const {
     return logits_;
@@ -192,11 +198,31 @@ private:
   loom_text_embed_t* embed_{nullptr};
   loom_text_embed_info_t info_{};
   loom_text_embed_logits_info_t logits_{};
+  std::optional<json::Value> chat_config_;
   mutable std::recursive_mutex mutex_;
   std::unordered_map<std::uint64_t, loom_text_embed_checkpoint_t*>
       checkpoints_;
   std::uint64_t next_checkpoint_{1};
   std::string fingerprint_;
+
+  static std::optional<json::Value> LoadChatConfig(const std::string& path) {
+    const auto manifest = ManifestPath(path);
+    if (!manifest)
+      return std::nullopt;
+    std::ifstream in(manifest->parent_path() / "llm_config.json",
+                     std::ios::binary);
+    if (!in)
+      return std::nullopt;
+    const std::string text((std::istreambuf_iterator<char>(in)), {});
+    try {
+      const auto config = json::parse(text);
+      const auto* chat = config.find("chat");
+      if (chat != nullptr && chat->is_object())
+        return *chat;
+    } catch (const std::exception&) {
+    }
+    return std::nullopt;
+  }
 
   // The card declares "llm.logits" (the package carries the readback).
   static bool DeclaresLogits(const std::string& path) {
@@ -263,6 +289,9 @@ public:
   // reasoning markers and (when the request declares tools) its native
   // tool-call syntax are the ones Gufo's grammars are written for.
   bool constraint_ok{false};
+  // The marker that starts a native tool call (a lazy tool grammar restricts
+  // once it is written).
+  std::string lazy_open;
   // The request declares tools with tool_choice auto and no response format:
   // its grammar is lazy, free until the call marker has been written.
   bool lazy_tools{false};

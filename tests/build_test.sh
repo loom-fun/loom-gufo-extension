@@ -21,8 +21,8 @@ cat > "$OUT/gufo/ext/detail/api_version.hpp" <<'EOF'
 #pragma once
 #include <string_view>
 namespace gufo::ext {
-inline constexpr unsigned kApiMajor = 0, kApiMinor = 3, kApiRevision = 15;
-inline constexpr std::string_view kApiVersion = "0.3.15";
+inline constexpr unsigned kApiMajor = 0, kApiMinor = 3, kApiRevision = 16;
+inline constexpr std::string_view kApiVersion = "0.3.16";
 }  // namespace gufo::ext
 EOF
 CXX=${CXX:-g++}

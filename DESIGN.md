@@ -106,13 +106,17 @@ has to leave the logits somewhere the embed layer can read.
   withheld tool calls are known with the last token, as on the device path.
   Whether the next epoch must leave a row is decided from the sampler as it
   will be once the token is accepted; a lazy tool grammar (`tool_choice`
-  auto) stays on the device until it restricts. The grammar is released
-  (as before) when the package's raw reasoning markers are not `<think>` or,
-  with tools, its native call syntax is not the JSON dialect Gufo writes.
+  auto) stays on the device until it restricts. Grammars constrain the model's own tokens, not the canonical
+  markup the runner publishes, so the runner describes the model's spelling to Gufo (`ToolGrammarSyntax` and
+  `ReasoningGrammarMarkers`, a small addition to the text runner contract in loom-fun/gufo): the package's
+  `llm_config.json` names its tool-call format and reasoning markers and `src/loom_dialect.hpp` maps them
+  to Gufo's `ToolSyntax` (Qwen XML, Hermes JSON, GLM tags, Gemma 4, OpenAI harmony and Llama JSON; pythonic and
+  ATEM calls cannot be spelled and stay unconstrained). Parsing of the published markup is unchanged.
 - **Tests.** `tests/build_test.sh` builds the runner against a fake embed
   library (a byte-level model with scripted logits) and checks the device path
   is untouched, logprobs, penalties, min-p, seeds, JSON-schema and tool
-  grammars, lazy tool grammars, dialect gating and mixed batches, without a GPU.
+  grammars, lazy tool grammars, every dialect's grammar against the call text the
+  kit's chat templates render, dialect gating and mixed batches, without a GPU.
 
 ## Limits (and what removes them)
 

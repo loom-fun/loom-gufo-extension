@@ -60,13 +60,14 @@ feeds it back (`loom_text_embed_decode_batch_tokens`). Everything else, and
 every package without the capability, keeps the device path unchanged: the
 default epoch and decode speed are the ones of a load without the capability.
 
-- Grammars apply to the model's own tokens, so a package takes them only when
-  its raw reasoning markers are `<think>`/`</think>` and, for tools, its native
-  tool calls are the JSON dialect (`<tool_call>{"name": ..., "arguments":
-  {...}}</tool_call>`); the runner probes the chat program at load and logs
-  what it found (`loom: logits on ...`). Other packages serve those requests
-  unconstrained, as before; logprobs, min-p and penalties work for every
-  package with the capability.
+- Grammars constrain the model's own tokens, so they are written in the dialect the package speaks: its
+  `llm_config.json` (shipped in the package) names the tool-call format and the reasoning markers, and
+  `src/loom_dialect.hpp` maps them to Gufo's `ToolSyntax`: `qwen_xml`, `hermes`, `glm`, `gemma4`, `harmony`
+  (gpt-oss) and `json` (Llama) have a grammar; `pythonic` (LFM2), `atem` (Glimmer) and `none` do not, and their
+  tool requests stay unconstrained as before. Reasoning markers are the model's own (`<think>`, gemma's
+  `<|channel>thought`, harmony's analysis channel). Response formats, logprobs, min-p and penalties work for
+  every package with the capability. The runner logs what it found at load (`loom: logits on ...`). A package
+  without `llm_config.json` is probed for the Hermes JSON dialect.
 - A request with a grammar, or with controls the device sampler lacks, runs
   undrafted (drafted packages lose the drafting speed-up for that request
   only). A lazy tool grammar (`tool_choice` auto) stays on the device until a
