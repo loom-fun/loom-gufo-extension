@@ -17,7 +17,7 @@ echo "loom-runtime: $RT"
 # gufo's configure needs the NPU runtime (XRT) even for a build without HIP
 XRT=$(nix build -L --no-link --print-out-paths /src/gufo#xrt-amdxdna 2>/dev/null || nix build -L --no-link --print-out-paths "path:/src/gufo#xrt-amdxdna")
 echo "xrt: $XRT"
-nix-shell -p gcc cmake ninja pkg-config icu curl libpng libjpeg libwebp libopus openssl ffmpeg-headless libuuid libuuid.dev cargo rustc git patchelf coreutils findutils --run "
+nix-shell -E 'let f = builtins.getFlake "path:/src/gufo"; p = f.inputs.nixpkgs.legacyPackages.x86_64-linux; in p.mkShell { packages = with p; [ gcc cmake ninja pkg-config icu curl libpng libjpeg libwebp libopus openssl ffmpeg-headless libuuid libuuid.dev cargo rustc git patchelf coreutils findutils ]; }'  --run "
 set -eu
 export PKG_CONFIG_PATH_FOR_TARGET=$RT/lib/pkgconfig:\$PKG_CONFIG_PATH_FOR_TARGET   # the nix pkg-config wrapper reads this spelling
 cmake /src/gufo -B /build/gufo -GNinja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF -DENGINE_ENABLE_HIP=OFF \
