@@ -185,6 +185,20 @@ public:
     const auto found = checkpoints_.find(id);
     return found == checkpoints_.end() ? nullptr : found->second;
   }
+  // Releases the oldest retained checkpoint (its cache entry then misses);
+  // false when none is left. Used when the device pool cannot back a row.
+  bool ReleaseOldest() {
+    std::lock_guard lock(mutex_);
+    if (checkpoints_.empty())
+      return false;
+    auto oldest = checkpoints_.begin();
+    for (auto it = checkpoints_.begin(); it != checkpoints_.end(); ++it)
+      if (it->first < oldest->first)
+        oldest = it;
+    loom_text_embed_checkpoint_release(embed_, oldest->second);
+    checkpoints_.erase(oldest);
+    return true;
+  }
   void Release(std::uint64_t id) {
     std::lock_guard lock(mutex_);
     const auto found = checkpoints_.find(id);

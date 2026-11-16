@@ -624,6 +624,20 @@ public:
     loom.slot->stale = false;
   }
 
+  // Runs a row reservation (0: reserved, 1: no capacity). When the device
+  // pool cannot back it, retained checkpoints are released oldest first (their
+  // cache entries then miss and re-prefill) and it is tried again, as
+  // loom-serve's prefix cache gives way under pressure.
+  template <class Reserve>
+  bool ReserveLocked(Reserve&& reserve) const {
+    for (;;) {
+      if (model_->Check(reserve(), "reserve", 1) == 0)
+        return true;
+      if (!model_->ReleaseOldest())
+        return false;
+    }
+  }
+
   [[nodiscard]] ext::TextPrefillStep Prefill(
       ext::TextRunnerState& state, std::span<const TextRunnerToken> prompt,
       std::size_t offset, std::size_t max_input_tokens) const override {
@@ -641,9 +655,7 @@ public:
       if (offset != 0)
         throw std::logic_error("loom row lost its state");
       ResetRowLocked(loom);
-      if (model_->Check(loom_text_embed_row_begin(embed, loom.row(), nullptr,
-                                                  extent, 1),
-                        "reserve", 1) != 0)
+      if (!ReserveLocked([&] { return loom_text_embed_row_begin(embed, loom.row(), nullptr, extent, 1); }))
         throw cache::ResourceExhausted();
     } else if (const std::uint64_t actual =
                    loom_text_embed_row_position(embed, loom.row()) +
@@ -654,9 +666,7 @@ public:
       throw std::logic_error("loom row holds " + std::to_string(actual) +
                              " tokens, continued at " + std::to_string(offset));
     } else if (loom_text_embed_row_extent(embed, loom.row()) < extent) {
-      if (model_->Check(
-              loom_text_embed_row_extend(embed, loom.row(), extent), "reserve",
-              1) != 0)
+      if (!ReserveLocked([&] { return loom_text_embed_row_extend(embed, loom.row(), extent); }))
         throw cache::ResourceExhausted();
       loom.bound.clear();
     }
@@ -1306,8 +1316,7 @@ private:
         std::min<std::uint64_t>(context, position + step + kExtentSlack);
     if (position + step > extent)
       throw std::length_error("loom row reached the context capacity");
-    if (model_->Check(loom_text_embed_row_extend(embed, loom.row(), extent),
-                      "reserve", 1) != 0)
+    if (!ReserveLocked([&] { return loom_text_embed_row_extend(embed, loom.row(), extent); }))
       throw cache::ResourceExhausted();
     // The reservation restarted the request; bind its sampling again.
     loom.bound.clear();
