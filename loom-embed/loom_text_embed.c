@@ -2,12 +2,17 @@
 
 #include "loom_text_embed.h"
 
+#include <ctype.h>
+#include <errno.h>
 #include <inttypes.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include "iree/base/api.h"
+#include "iree/base/internal/json.h"
 #include "iree/base/internal/path.h"
 #include "iree/tokenizer/tokenizer.h"
 #include "iree/tokenizer/vocab/vocab.h"
@@ -57,6 +62,25 @@ struct loom_text_embed_t {
   uint64_t request_serial;
   char model_id[256];
   char error[2048];
+  // ABI 2: logits. The package declares "llm.logits"; the handle may be
+  // opened with it on, which rewrites the card (a private copy in card_dir)
+  // and leaves the package's own files untouched.
+  bool logits_declared;
+  bool logits_enabled;
+  char* package_dir;
+  char* card_dir;
+  char* card_path;
+  // Export region of the epoch outputs allocation: byte offset of slot 0,
+  // bytes per slot, floats per row, slots (widest epoch's span capacity).
+  uint64_t logits_offset;
+  uint64_t logits_stride;
+  uint32_t logits_width;
+  uint32_t logits_slots;
+  // Per row: asked for logits by its bound request; host copy of the logit
+  // row of its pending selection and whether that copy is current.
+  uint8_t* logit_flag;
+  uint8_t* logit_valid;
+  float** logit_rows;
 };
 
 struct loom_text_embed_request_t {
@@ -70,6 +94,8 @@ struct loom_text_embed_request_t {
   loom_serve_text_media_request_t* media;
   // Generated text so far, and whether a reasoning span is open on output.
   iree_string_builder_t response;
+  // The body asked for logits ("logits": true).
+  bool logits;
   bool reasoning_open;
   bool finished;
   // Response offsets: where the last reasoning span ended, and the framing
@@ -154,18 +180,194 @@ static iree_status_t loom_text_embed_open_devices(
 // Owner wakes are not needed: image work is driven by polling.
 static void loom_text_embed_wake(void* user_data) { (void)user_data; }
 
+//===----------------------------------------------------------------------===//
+// Logits capability: card handling and the export region.
+//===----------------------------------------------------------------------===//
+
+#define LOOM_TEXT_EMBED_LOGITS_KEY "\"llm.logits\""
+// The epoch outputs allocation (storage.loom slot 5): token feedback first,
+// then, when the package is loaded with llm.logits, one row of logits per span.
+#define LOOM_TEXT_EMBED_OUTPUTS_ALLOCATION 5
+
+static char* loom_text_embed_read_file(const char* path, size_t* out_size) {
+  FILE* file = fopen(path, "rb");
+  if (!file) return NULL;
+  fseek(file, 0, SEEK_END);
+  long size = ftell(file);
+  fseek(file, 0, SEEK_SET);
+  char* data = size >= 0 ? (char*)malloc((size_t)size + 1) : NULL;
+  if (data && fread(data, 1, (size_t)size, file) != (size_t)size) {
+    free(data);
+    data = NULL;
+  }
+  fclose(file);
+  if (data) {
+    data[size] = 0;
+    *out_size = (size_t)size;
+  }
+  return data;
+}
+
+// Visits every "llm.logits" member in a card's text; when `set` is nonzero
+// rewrites a false value to true (same length) in place. Returns the number of
+// members found, or -1 for a value that is not a boolean.
+static int loom_text_embed_scan_logits(char* text, int set) {
+  int found = 0;
+  for (char* at = strstr(text, LOOM_TEXT_EMBED_LOGITS_KEY); at;
+       at = strstr(at + 1, LOOM_TEXT_EMBED_LOGITS_KEY)) {
+    char* cursor = at + strlen(LOOM_TEXT_EMBED_LOGITS_KEY);
+    while (isspace((unsigned char)*cursor)) ++cursor;
+    if (*cursor != ':') continue;
+    ++cursor;
+    while (isspace((unsigned char)*cursor)) ++cursor;
+    if (!strncmp(cursor, "false", 5)) {
+      if (set) memcpy(cursor, "true ", 5);
+    } else if (strncmp(cursor, "true", 4)) {
+      return -1;
+    }
+    ++found;
+  }
+  return found;
+}
+
+static iree_status_t loom_text_embed_prepare_card(
+    loom_text_embed_t* embed, const char* path, bool enable) {
+  size_t size = 0;
+  char* text = loom_text_embed_read_file(path, &size);
+  if (!text) {
+    return iree_make_status(IREE_STATUS_NOT_FOUND, "cannot read %s", path);
+  }
+  const int declared = loom_text_embed_scan_logits(text, 0);
+  embed->logits_declared = declared > 0;
+  iree_status_t status = iree_ok_status();
+  if (enable) {
+    if (declared < 0) {
+      status = iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
+                                "llm.logits must be a boolean in the card");
+    } else if (declared == 0) {
+      status = iree_make_status(IREE_STATUS_FAILED_PRECONDITION,
+                                "this package does not declare llm.logits; "
+                                "regenerate it with a logits-capable kit");
+    }
+  }
+  if (iree_status_is_ok(status) && enable) {
+    loom_text_embed_scan_logits(text, 1);
+    const char* base = getenv("TMPDIR");
+    char directory[4096];
+    snprintf(directory, sizeof(directory), "%s/loom_embed_XXXXXX",
+             base && base[0] ? base : "/tmp");
+    if (!mkdtemp(directory)) {
+      status = iree_make_status(IREE_STATUS_UNAVAILABLE,
+                                "cannot create a temporary card directory: %s",
+                                strerror(errno));
+    } else {
+      embed->card_dir = strdup(directory);
+      char card[4200];
+      snprintf(card, sizeof(card), "%s/model.json", directory);
+      embed->card_path = strdup(card);
+      FILE* file = fopen(card, "wb");
+      if (!file || fwrite(text, 1, size, file) != size) {
+        status = iree_make_status(IREE_STATUS_UNAVAILABLE,
+                                  "cannot write %s: %s", card, strerror(errno));
+      }
+      if (file) fclose(file);
+    }
+  }
+  free(text);
+  return status;
+}
+
+static void loom_text_embed_remove_card(loom_text_embed_t* embed) {
+  if (embed->card_path) {
+    unlink(embed->card_path);
+    free(embed->card_path);
+    embed->card_path = NULL;
+  }
+  if (embed->card_dir) {
+    rmdir(embed->card_dir);
+    free(embed->card_dir);
+    embed->card_dir = NULL;
+  }
+}
+
+// Widest epoch shape's span capacity (the storage program sizes its per-span
+// regions by it).
+static iree_host_size_t loom_text_embed_span_capacity(
+    const loom_text_embed_t* embed) {
+  iree_host_size_t spans = 0;
+  for (iree_host_size_t i = 0; i < embed->shape_count; ++i) {
+    spans = iree_max(spans, embed->shapes[i].span_capacity);
+  }
+  return spans;
+}
+
+// The export region of the epoch outputs allocation, as the package's storage
+// program sizes it (starter kit, LOGITS.md): slot 0 starts at byte
+// LOOM_TEXT_EMBED_LOGITS_OFFSET (after the 8192 span tokens), and each of the
+// min(widest epoch's spans, resident rows) slots is ceil(vocab / 128) * 512
+// bytes. The stride is derived from the allocation's size and checked.
+#define LOOM_TEXT_EMBED_LOGITS_OFFSET 32768
+
+static iree_status_t loom_text_embed_logits_layout(loom_text_embed_t* embed) {
+  loom_serve_text_state_t* state = &embed->model->state;
+  if (!state->cache.capacity &&
+      !iree_any_bit_set(state->flags, LOOM_SERVE_TEXT_STATE_FLAG_DRAFT)) {
+    return iree_make_status(IREE_STATUS_FAILED_PRECONDITION,
+                            "logits need the packed epoch path (pool_capacity)");
+  }
+  iree_hal_buffer_t* outputs =
+      *loom_serve_text_state_allocation(state,
+                                        LOOM_TEXT_EMBED_OUTPUTS_ALLOCATION);
+  const uint64_t length = outputs ? iree_hal_buffer_byte_length(outputs) : 0;
+  const uint64_t slots =
+      iree_min(loom_text_embed_span_capacity(embed), embed->rows);
+  const uint64_t offset = LOOM_TEXT_EMBED_LOGITS_OFFSET;
+  if (!slots || length <= offset || (length - offset) % slots ||
+      ((length - offset) / slots) % 512) {
+    return iree_make_status(
+        IREE_STATUS_FAILED_PRECONDITION,
+        "outputs allocation (%" PRIu64 " bytes, %" PRIu64
+        " slots) has no logits region; the package was not built with "
+        "llm.logits or uses another layout",
+        length, slots);
+  }
+  embed->logits_offset = offset;
+  embed->logits_stride = (length - offset) / slots;
+  embed->logits_width = (uint32_t)(embed->logits_stride / 4);
+  embed->logits_slots = (uint32_t)slots;
+  return iree_ok_status();
+}
+
 static iree_status_t loom_text_embed_open_model(
-    loom_text_embed_t* embed, const loom_text_embed_options_t* options) {
+    loom_text_embed_t* embed, const loom_text_embed_options_ex_t* ex) {
+  const loom_text_embed_options_t* options = &ex->base;
   char path[4096];
   const size_t length = strlen(options->model_path);
   const bool json = length >= 5 && !strcmp(options->model_path + length - 5,
                                             ".json");
   snprintf(path, sizeof(path), json ? "%s" : "%s/model.json",
            options->model_path);
+  {
+    iree_string_view_t directory =
+        iree_file_path_dirname(iree_make_cstring_view(path));
+    embed->package_dir = strndup(directory.size ? directory.data : ".",
+                                 directory.size ? directory.size : 1);
+  }
+  IREE_RETURN_IF_ERROR(loom_text_embed_prepare_card(embed, path, ex->logits));
+  const char* card_path = ex->logits ? embed->card_path : path;
   IREE_RETURN_IF_ERROR(loom_serve_model_configuration_load(
-      iree_make_cstring_view(path),
+      iree_make_cstring_view(card_path),
       iree_make_cstring_view(options->preset ? options->preset : ""),
       embed->allocator, &embed->configuration));
+  if (ex->logits) {
+    // The card was read from its private copy; everything it names (programs,
+    // parameters, tokenizer) is still the package's.
+    const iree_string_view_t package = iree_make_cstring_view(embed->package_dir);
+    embed->configuration.sources.base_directory = package;
+    if (embed->configuration.resolved_sources) {
+      embed->configuration.resolved_sources->base_directory = package;
+    }
+  }
   if (embed->configuration.sources.reference.path.size) {
     IREE_RETURN_IF_ERROR(loom_serve_model_configuration_resolve(
         &embed->configuration, embed->allocator, &embed->resolved));
@@ -232,11 +434,24 @@ static iree_status_t loom_text_embed_open_model(
         (loom_serve_wake_callback_t){loom_text_embed_wake, NULL},
         embed->allocator, &embed->image));
   }
-  return loom_serve_text_model_activate(embed->model);
+  IREE_RETURN_IF_ERROR(loom_serve_text_model_activate(embed->model));
+  if (ex->logits) {
+    IREE_RETURN_IF_ERROR(loom_text_embed_logits_layout(embed));
+    embed->logits_enabled = true;
+  }
+  IREE_RETURN_IF_ERROR(iree_allocator_malloc(embed->allocator, 2 * embed->rows,
+                                              (void**)&embed->logit_flag));
+  memset(embed->logit_flag, 0, 2 * embed->rows);
+  embed->logit_valid = embed->logit_flag + embed->rows;
+  IREE_RETURN_IF_ERROR(iree_allocator_malloc(
+      embed->allocator, embed->rows * sizeof(float*),
+      (void**)&embed->logit_rows));
+  memset(embed->logit_rows, 0, embed->rows * sizeof(float*));
+  return iree_ok_status();
 }
 
-LOOM_TEXT_EMBED_EXPORT int loom_text_embed_open(
-    const loom_text_embed_options_t* options, loom_text_embed_t** out_embed,
+LOOM_TEXT_EMBED_EXPORT int loom_text_embed_open_ex(
+    const loom_text_embed_options_ex_t* options, loom_text_embed_t** out_embed,
     char* error, size_t error_size) {
   *out_embed = NULL;
   iree_allocator_t allocator = iree_allocator_system();
@@ -248,7 +463,7 @@ LOOM_TEXT_EMBED_EXPORT int loom_text_embed_open(
   }
   memset(embed, 0, sizeof(*embed));
   embed->allocator = allocator;
-  status = loom_text_embed_open_devices(embed, options);
+  status = loom_text_embed_open_devices(embed, &options->base);
   if (iree_status_is_ok(status)) {
     status = loom_text_embed_open_model(embed, options);
   }
@@ -258,6 +473,14 @@ LOOM_TEXT_EMBED_EXPORT int loom_text_embed_open(
   }
   *out_embed = embed;
   return 0;
+}
+
+LOOM_TEXT_EMBED_EXPORT int loom_text_embed_open(
+    const loom_text_embed_options_t* options, loom_text_embed_t** out_embed,
+    char* error, size_t error_size) {
+  const loom_text_embed_options_ex_t ex = {
+      .struct_size = sizeof(ex), .base = *options, .logits = 0};
+  return loom_text_embed_open_ex(&ex, out_embed, error, error_size);
 }
 
 LOOM_TEXT_EMBED_EXPORT void loom_text_embed_close(loom_text_embed_t* embed) {
@@ -281,6 +504,11 @@ LOOM_TEXT_EMBED_EXPORT void loom_text_embed_close(loom_text_embed_t* embed) {
     iree_status_ignore(loom_serve_device_group_free(embed->group));
   }
   loom_serve_device_configuration_deinitialize(&embed->devices);
+  if (embed->logit_rows) {
+    for (uint32_t i = 0; i < embed->rows; ++i) free(embed->logit_rows[i]);
+  }
+  iree_allocator_free(embed->allocator, embed->logit_rows);
+  iree_allocator_free(embed->allocator, embed->logit_flag);
   iree_allocator_free(embed->allocator, embed->extents);
   iree_allocator_free(embed->allocator, embed->shapes);
   if (embed->has_resolved) {
@@ -288,6 +516,8 @@ LOOM_TEXT_EMBED_EXPORT void loom_text_embed_close(loom_text_embed_t* embed) {
   }
   loom_serve_model_configuration_deinitialize(&embed->configuration);
   if (embed->host) loom_serve_host_release(embed->host);
+  loom_text_embed_remove_card(embed);
+  free(embed->package_dir);
   iree_allocator_free(embed->allocator, embed);
 }
 
@@ -322,6 +552,54 @@ LOOM_TEXT_EMBED_EXPORT void loom_text_embed_info(
                    : 0;
 }
 
+// Removes the top-level `"logits": <value>` member from the request body (in place; the body is a NUL-terminated copy owned by the request).
+// This loom (hrx-system v0.1.0) validates the top-level chat fields against a closed set and rejects `logits` ("unsupported chat field"),
+// while the flag is the embed layer's own: it is applied to the bound sampling record instead (loom_text_embed_apply_logits_flag).
+static void loom_text_embed_strip_logits(char* body, size_t* size, iree_string_view_t value) {
+  if (!value.data || value.data < body || value.data + value.size > body + *size) return;
+  char* end = (char*)value.data + value.size;
+  char* key_end = (char*)value.data;
+  while (key_end > body && isspace((unsigned char)key_end[-1])) --key_end;
+  if (key_end == body || key_end[-1] != ':') return;
+  --key_end;
+  while (key_end > body && isspace((unsigned char)key_end[-1])) --key_end;
+  static const char kKey[] = "\"logits\"";
+  const size_t key_length = sizeof(kKey) - 1;
+  if ((size_t)(key_end - body) < key_length || memcmp(key_end - key_length, kKey, key_length) != 0) return;
+  char* start = key_end - key_length;
+  char* tail = end;
+  while (tail < body + *size && isspace((unsigned char)*tail)) ++tail;
+  if (tail < body + *size && *tail == ',') {
+    end = tail + 1;                               // a following comma goes with the member
+    while (end < body + *size && isspace((unsigned char)*end)) ++end;
+  } else {
+    char* before = start;
+    while (before > body && isspace((unsigned char)before[-1])) --before;
+    if (before > body && before[-1] == ',') start = before - 1;   // else the preceding comma
+  }
+  memmove(start, end, (size_t)(body + *size - end) + 1);
+  *size -= (size_t)(end - start);
+}
+
+// Sets bit 30 of the bound sampling record's top_k (control.loom: the per-span export flag of the package). The record the package
+// returned is replaced by a patched copy (it is 16 bytes: temperature, top_p, top_k, seed/nonce).
+static iree_status_t loom_text_embed_apply_logits_flag(loom_text_embed_t* embed, loom_text_embed_request_t* request) {
+  iree_vm_buffer_t* options = request->chat.options;
+  if (!options) return iree_ok_status();
+  iree_const_byte_span_t span;
+  IREE_RETURN_IF_ERROR(iree_vm_buffer_map_read(options, 0, 4 * sizeof(uint32_t), &span));
+  uint32_t record[4];
+  memcpy(record, span.data, sizeof(record));
+  record[2] |= 0x40000000u;
+  iree_vm_buffer_t* patched = NULL;
+  IREE_RETURN_IF_ERROR(iree_vm_buffer_clone(IREE_VM_BUFFER_ACCESS_FLAG_READ,
+                                            iree_make_const_byte_span(record, sizeof(record)), 1, embed->allocator,
+                                            &patched));
+  iree_vm_buffer_release(options);
+  request->chat.options = patched;
+  return iree_ok_status();
+}
+
 LOOM_TEXT_EMBED_EXPORT int loom_text_embed_chat_prepare(
     loom_text_embed_t* embed, const char* body, size_t body_size,
     int32_t* tokens, size_t capacity, size_t* out_count,
@@ -339,12 +617,29 @@ LOOM_TEXT_EMBED_EXPORT int loom_text_embed_chat_prepare(
   request->body = (char*)(request + 1);
   memcpy(request->body, body, body_size);
   request->body[body_size] = 0;
+  {
+    // "logits": true asks for the full logit row of every selection.
+    iree_string_view_t value = iree_string_view_empty();
+    iree_status_t lookup = iree_json_try_lookup_object_value(
+        iree_make_string_view(request->body, body_size), IREE_SV("logits"),
+        &value);
+    if (iree_status_is_ok(lookup)) {
+      request->logits = value.data && iree_string_view_equal(value, IREE_SV("true"));
+      loom_text_embed_strip_logits(request->body, &body_size, value);
+    } else {
+      iree_status_ignore(lookup);
+    }
+  }
   const loom_serve_model_configuration_t* configuration =
       loom_text_embed_config(embed);
   status = loom_serve_text_chat_initialize(
       loom_serve_text_model_chat_policy(embed->model), configuration->name,
       iree_make_string_view(request->body, body_size), ++embed->request_serial,
       /*default_max_tokens=*/1, embed->allocator, &request->chat);
+  if (iree_status_is_ok(status) && request->logits) {
+    status = loom_text_embed_apply_logits_flag(embed, request);
+    if (!iree_status_is_ok(status)) loom_serve_text_chat_deinitialize(&request->chat);
+  }
   if (iree_status_is_ok(status)) {
     loom_serve_text_media_span_t* media = NULL;
     iree_host_size_t media_count = 0;
@@ -482,6 +777,157 @@ loom_text_embed_vocabulary_size(loom_text_embed_t* embed) {
       iree_tokenizer_vocab(loom_serve_text_model_tokenizer(embed->model)));
 }
 
+//===----------------------------------------------------------------------===//
+// ABI 2: logit rows.
+//===----------------------------------------------------------------------===//
+
+#define LOOM_TEXT_EMBED_MAX_BATCH 256
+
+// Binds a request's logits flag to a row. A request that asks for logits on a
+// handle opened without them is refused rather than silently ignored.
+static iree_status_t loom_text_embed_set_logit_row(
+    loom_text_embed_t* embed, uint32_t row,
+    const loom_text_embed_request_t* request) {
+  if (row >= embed->rows) {
+    return iree_make_status(IREE_STATUS_OUT_OF_RANGE, "row %u", row);
+  }
+  if (request->logits && !embed->logits_enabled) {
+    return iree_make_status(
+        IREE_STATUS_FAILED_PRECONDITION,
+        "request asks for logits but this handle was opened without them");
+  }
+  const uint8_t flag = request->logits ? 1 : 0;
+  if (embed->logit_flag[row] != flag) embed->logit_valid[row] = 0;
+  embed->logit_flag[row] = flag;
+  return iree_ok_status();
+}
+
+static void loom_text_embed_clear_logit_row(loom_text_embed_t* embed,
+                                            uint32_t row) {
+  if (row >= embed->rows) return;
+  embed->logit_flag[row] = 0;
+  embed->logit_valid[row] = 0;
+}
+
+// After a selecting epoch: downloads the logit row of every flagged row (span
+// i of the epoch sits in export slot i) into that row's host copy, and marks
+// the other rows' copies stale. One transfer batch, behind the epoch's
+// completion.
+static iree_status_t loom_text_embed_collect_logits(loom_text_embed_t* embed,
+                                                    const uint32_t* rows,
+                                                    size_t count) {
+  if (!embed->logits_enabled) return iree_ok_status();
+  loom_serve_text_state_t* state = &embed->model->state;
+  iree_hal_buffer_t* outputs =
+      *loom_serve_text_state_allocation(state,
+                                        LOOM_TEXT_EMBED_OUTPUTS_ALLOCATION);
+  iree_hal_transfer_operation_t operations[64];
+  uint32_t targets[64];
+  iree_host_size_t pending = 0;
+  iree_status_t status = iree_ok_status();
+  bool drained = false;
+  for (size_t i = 0; i < count && iree_status_is_ok(status); ++i) {
+    const uint32_t row = rows[i];
+    if (!embed->logit_flag[row]) {
+      embed->logit_valid[row] = 0;
+      continue;
+    }
+    if (i >= embed->logits_slots) {
+      status = iree_make_status(IREE_STATUS_OUT_OF_RANGE,
+                                "epoch span %zu has no logits slot", i);
+      break;
+    }
+    if (!embed->logit_rows[row]) {
+      embed->logit_rows[row] = (float*)malloc(embed->logits_stride);
+      if (!embed->logit_rows[row]) {
+        status = iree_make_status(IREE_STATUS_RESOURCE_EXHAUSTED,
+                                  "logit row buffer");
+        break;
+      }
+    }
+    if (!drained) {
+      status = loom_serve_execution_drain(state->execution);
+      drained = true;
+      if (!iree_status_is_ok(status)) break;
+    }
+    embed->logit_valid[row] = 0;
+    operations[pending] = (iree_hal_transfer_operation_t){
+        .type = IREE_HAL_TRANSFER_OPERATION_TYPE_DOWNLOAD,
+        .download = {.source_buffer = outputs,
+                     .source_offset = embed->logits_offset +
+                                      (uint64_t)i * embed->logits_stride,
+                     .target = (uint8_t*)embed->logit_rows[row],
+                     .length = embed->logits_stride}};
+    targets[pending++] = row;
+    if (pending == IREE_ARRAYSIZE(operations)) {
+      uint64_t completion = 0;
+      status = loom_serve_execution_transfer(state->execution, pending,
+                                             operations, &completion);
+      for (iree_host_size_t k = 0; k < pending; ++k) {
+        embed->logit_valid[targets[k]] = iree_status_is_ok(status);
+      }
+      pending = 0;
+    }
+  }
+  if (iree_status_is_ok(status) && pending) {
+    uint64_t completion = 0;
+    status = loom_serve_execution_transfer(state->execution, pending,
+                                           operations, &completion);
+    for (iree_host_size_t k = 0; k < pending; ++k) {
+      embed->logit_valid[targets[k]] = iree_status_is_ok(status);
+    }
+  }
+  if (drained) {
+    status = iree_status_join(status, loom_serve_execution_drain(state->execution));
+  }
+  return status;
+}
+
+LOOM_TEXT_EMBED_EXPORT void loom_text_embed_logits_info(
+    const loom_text_embed_t* embed, loom_text_embed_logits_info_t* out_info) {
+  memset(out_info, 0, sizeof(*out_info));
+  out_info->supported = embed->logits_declared;
+  out_info->enabled = embed->logits_enabled;
+  out_info->width = embed->logits_width;
+  out_info->max_rows = embed->logits_slots;
+}
+
+LOOM_TEXT_EMBED_EXPORT int loom_text_embed_request_logits(
+    const loom_text_embed_request_t* request) {
+  return request->logits ? 1 : 0;
+}
+
+LOOM_TEXT_EMBED_EXPORT int loom_text_embed_row_is_logit(
+    loom_text_embed_t* embed, uint32_t row) {
+  return row < embed->rows && embed->logit_flag[row];
+}
+
+LOOM_TEXT_EMBED_EXPORT int loom_text_embed_row_logits(
+    loom_text_embed_t* embed, uint32_t row, float* out, size_t capacity,
+    size_t* out_count) {
+  *out_count = 0;
+  if (row >= embed->rows || !embed->logit_flag[row] ||
+      !embed->logit_valid[row]) {
+    EMBED_RETURN(embed, iree_make_status(
+                            IREE_STATUS_FAILED_PRECONDITION,
+                            "row %u has no logits for its pending selection",
+                            row));
+  }
+  if (capacity < embed->logits_width) {
+    EMBED_RETURN(embed, iree_make_status(IREE_STATUS_OUT_OF_RANGE,
+                                         "logits need %u floats, got %zu",
+                                         embed->logits_width, capacity));
+  }
+  memcpy(out, embed->logit_rows[row], embed->logits_stride);
+  *out_count = embed->logits_width;
+  return 0;
+}
+
+LOOM_TEXT_EMBED_EXPORT int loom_text_embed_is_stop_token(
+    const loom_text_embed_t* embed, int32_t token) {
+  return token == embed->model->source.eos_token;
+}
+
 static loom_serve_text_row_t* loom_text_embed_row(loom_text_embed_t* embed,
                                                   uint32_t row) {
   return loom_serve_text_model_row(embed->model, row);
@@ -501,7 +947,10 @@ LOOM_TEXT_EMBED_EXPORT int loom_text_embed_row_begin(
   if (iree_status_is_ok(status) && !admitted) return 1;
   if (iree_status_is_ok(status)) embed->extents[row] = extent;
   if (iree_status_is_ok(status) && request) {
-    status = loom_serve_text_row_bind_request(handle, request->chat.options);
+    status = loom_text_embed_set_logit_row(embed, row, request);
+    if (iree_status_is_ok(status)) {
+      status = loom_serve_text_row_bind_request(handle, request->chat.options);
+    }
   }
   EMBED_RETURN(embed, status);
 }
@@ -520,19 +969,24 @@ loom_text_embed_row_extent(loom_text_embed_t* embed, uint32_t row) {
 LOOM_TEXT_EMBED_EXPORT int loom_text_embed_row_bind(
     loom_text_embed_t* embed, uint32_t row,
     const loom_text_embed_request_t* request) {
-  EMBED_RETURN(embed, loom_serve_text_row_bind_request(
-                          loom_text_embed_row(embed, row),
-                          request->chat.options));
+  iree_status_t status = loom_text_embed_set_logit_row(embed, row, request);
+  if (iree_status_is_ok(status)) {
+    status = loom_serve_text_row_bind_request(loom_text_embed_row(embed, row),
+                                              request->chat.options);
+  }
+  EMBED_RETURN(embed, status);
 }
 
 LOOM_TEXT_EMBED_EXPORT void loom_text_embed_row_end(loom_text_embed_t* embed,
                                                     uint32_t row) {
   loom_serve_text_row_release_reservation(loom_text_embed_row(embed, row));
   embed->extents[row] = 0;
+  loom_text_embed_clear_logit_row(embed, row);
 }
 
 LOOM_TEXT_EMBED_EXPORT int loom_text_embed_row_reset(loom_text_embed_t* embed,
                                                      uint32_t row) {
+  loom_text_embed_clear_logit_row(embed, row);
   EMBED_RETURN(embed, loom_serve_text_row_reset(loom_text_embed_row(embed, row)));
 }
 
@@ -546,13 +1000,21 @@ LOOM_TEXT_EMBED_EXPORT int loom_text_embed_row_prefill(
     status = loom_serve_text_row_prefill(handle, chunk, tokens + offset);
     offset += chunk;
   }
+  if (iree_status_is_ok(status) && count) {
+    // Only the last chunk's selection is the row's pending one.
+    status = loom_text_embed_collect_logits(embed, &row, 1);
+  }
   EMBED_RETURN(embed, status);
 }
 
 LOOM_TEXT_EMBED_EXPORT int loom_text_embed_row_decode(loom_text_embed_t* embed,
                                                       uint32_t row) {
-  EMBED_RETURN(embed,
-               loom_serve_text_row_decode(loom_text_embed_row(embed, row)));
+  iree_status_t status =
+      loom_serve_text_row_decode(loom_text_embed_row(embed, row));
+  if (iree_status_is_ok(status)) {
+    status = loom_text_embed_collect_logits(embed, &row, 1);
+  }
+  EMBED_RETURN(embed, status);
 }
 
 LOOM_TEXT_EMBED_EXPORT int32_t loom_text_embed_row_token(
@@ -592,8 +1054,6 @@ static bool loom_text_embed_shape(const loom_text_embed_t* embed,
   return found;
 }
 
-#define LOOM_TEXT_EMBED_MAX_BATCH 256
-
 LOOM_TEXT_EMBED_EXPORT int loom_text_embed_decode_batch(
     loom_text_embed_t* embed, const uint32_t* rows, size_t count) {
   if (count == 1) return loom_text_embed_row_decode(embed, rows[0]);
@@ -618,8 +1078,44 @@ LOOM_TEXT_EMBED_EXPORT int loom_text_embed_decode_batch(
         .flags = LOOM_SERVE_TEXT_SPAN_FLAG_SELECT,
     };
   }
-  EMBED_RETURN(embed,
-               loom_serve_text_model_epoch(embed->model, shape, count, spans));
+  iree_status_t status =
+      loom_serve_text_model_epoch(embed->model, shape, count, spans);
+  if (iree_status_is_ok(status)) {
+    status = loom_text_embed_collect_logits(embed, rows, count);
+  }
+  EMBED_RETURN(embed, status);
+}
+
+LOOM_TEXT_EMBED_EXPORT int loom_text_embed_decode_batch_tokens(
+    loom_text_embed_t* embed, const uint32_t* rows, size_t count,
+    const int32_t* tokens) {
+  if (!count || count > LOOM_TEXT_EMBED_MAX_BATCH) {
+    EMBED_RETURN(embed, iree_make_status(IREE_STATUS_OUT_OF_RANGE,
+                                         "decode batch of %zu rows", count));
+  }
+  iree_host_size_t shape = 0;
+  if (!loom_text_embed_shape(embed, count, count, &shape)) {
+    EMBED_RETURN(embed, iree_make_status(IREE_STATUS_OUT_OF_RANGE,
+                                         "no shape for %zu decode spans",
+                                         count));
+  }
+  int32_t input[LOOM_TEXT_EMBED_MAX_BATCH];
+  loom_serve_text_span_t spans[LOOM_TEXT_EMBED_MAX_BATCH];
+  for (size_t i = 0; i < count; ++i) {
+    input[i] = tokens[i];
+    spans[i] = (loom_serve_text_span_t){
+        .row_index = rows[i],
+        .token_count = 1,
+        .token_ids = &input[i],
+        .flags = LOOM_SERVE_TEXT_SPAN_FLAG_SELECT,
+    };
+  }
+  iree_status_t status =
+      loom_serve_text_model_epoch(embed->model, shape, count, spans);
+  if (iree_status_is_ok(status)) {
+    status = loom_text_embed_collect_logits(embed, rows, count);
+  }
+  EMBED_RETURN(embed, status);
 }
 
 LOOM_TEXT_EMBED_EXPORT int loom_text_embed_verify_batch(
@@ -627,6 +1123,13 @@ LOOM_TEXT_EMBED_EXPORT int loom_text_embed_verify_batch(
     const uint32_t* limits, int32_t* tokens, uint32_t* counts,
     uint32_t* consumed) {
   const iree_host_size_t width = embed->draft_depth + 1;
+  for (size_t i = 0; i < count; ++i) {
+    if (rows[i] < embed->rows && embed->logit_flag[rows[i]]) {
+      EMBED_RETURN(embed, iree_make_status(
+                              IREE_STATUS_FAILED_PRECONDITION,
+                              "logit rows run undrafted: use decode_batch"));
+    }
+  }
   if (!embed->draft_depth || count > LOOM_TEXT_EMBED_MAX_BATCH) {
     EMBED_RETURN(embed, iree_make_status(IREE_STATUS_FAILED_PRECONDITION,
                                          "drafting is unavailable"));
@@ -872,6 +1375,7 @@ LOOM_TEXT_EMBED_EXPORT int loom_text_embed_row_restore(
   loom_serve_text_row_t* handle = loom_text_embed_row(embed, row);
   loom_serve_text_row_release_reservation(handle);
   embed->extents[row] = 0;
+  embed->logit_valid[row] = 0;
   iree_status_t status = loom_serve_text_row_try_restore(
       handle, (const loom_serve_text_checkpoint_t*)checkpoint, &done);
   *restored = done;
@@ -1254,6 +1758,9 @@ LOOM_TEXT_EMBED_EXPORT int loom_text_embed_row_prefill_request(
       loom_serve_text_model_epoch(embed->model, shape, 1, &span);
   if (iree_status_is_ok(status) && request->media) {
     loom_serve_text_media_request_consume(request->media, offset + count);
+  }
+  if (iree_status_is_ok(status) && select) {
+    status = loom_text_embed_collect_logits(embed, &row, 1);
   }
   EMBED_RETURN(embed, status);
 }

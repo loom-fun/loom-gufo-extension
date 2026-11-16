@@ -140,23 +140,19 @@ std::string ChatBody(const std::string& model, const ext::ChatRequest& request,
         definition["type"] = "function";
         definition["function"] = std::move(function);
       }
+      // "strict" is Gufo's to enforce (the host grammar over the returned logits); Loom's chat parser (hrx-system v0.1.0) refuses
+      // strict=true outright ("strict constrained tool sampling is not implemented"), so the rendered prompt carries it off.
+      if (definition.is_object() && definition.contains("function") && definition["function"].is_object() &&
+          definition["function"].contains("strict"))
+        definition["function"]["strict"] = false;
       tools.push_back(std::move(definition));
     }
     body["tools"] = std::move(tools);
     if (request.tool_choice == ext::ChatRequest::ToolChoice::kNone) {
       body["tool_choice"] = "none";
-    } else if (request.tool_choice == ext::ChatRequest::ToolChoice::kRequired) {
-      if (request.forced_tool_name.empty()) {
-        body["tool_choice"] = "required";
-      } else {
-        json::Value function = json::Value::object();
-        function["name"] = request.forced_tool_name;
-        json::Value choice = json::Value::object();
-        choice["type"] = "function";
-        choice["function"] = std::move(function);
-        body["tool_choice"] = std::move(choice);
-      }
     }
+    // Required and named tool calls are enforced on the host (the grammar over the returned logits); Loom's chat parser
+    // (hrx-system v0.1.0) accepts only "auto" and "none" for tool_choice, so the prompt is rendered with the default (auto).
   }
   if (request.reasoning.enabled.has_value()) {
     json::Value kwargs = json::Value::object();
@@ -175,7 +171,7 @@ std::string ChatBody(const std::string& model, const ext::ChatRequest& request,
 
 // A request body that only carries sampling, for row binding.
 std::string SamplingBody(const std::string& model,
-                         const sampling::SamplingConfig& config) {
+                         const sampling::SamplingConfig& config, bool logits) {
   json::Value body = json::Value::object();
   body["model"] = model;
   json::Value message = json::Value::object();
@@ -190,6 +186,8 @@ std::string SamplingBody(const std::string& model,
     body["top_k"] = config.top_k;
   if (config.seed >= 0)
     body["seed"] = config.seed;
+  if (logits)
+    body["logits"] = true;
   return body.dump();
 }
 

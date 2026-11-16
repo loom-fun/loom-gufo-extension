@@ -101,7 +101,17 @@ public:
     if (const auto* value =
             ext::FindOption<std::int64_t>(options, "--loom-memory-bytes"))
       memory = static_cast<std::uint64_t>(*value);
-    loom_text_embed_options_t embed_options{
+    // --loom-logits: auto (default) opens with the logits capability when the
+    // package declares it; on requires it; off never uses it.
+    std::string logits_mode = "auto";
+    if (const auto* value =
+            ext::FindOption<std::string>(options, "--loom-logits"))
+      logits_mode = *value;
+    if (logits_mode != "auto" && logits_mode != "on" && logits_mode != "off")
+      throw std::invalid_argument("--loom-logits must be auto, on or off");
+    loom_text_embed_options_ex_t embed_options{};
+    embed_options.struct_size = sizeof(embed_options);
+    embed_options.base = {
         .model_path = path.c_str(),
         .preset = preset.c_str(),
         .device_uri = device.empty() ? nullptr : device.c_str(),
@@ -109,10 +119,28 @@ public:
         .rows = static_cast<std::uint32_t>(std::max<std::size_t>(sessions, 1)),
         .checkpoints = kCheckpoints,
     };
+    embed_options.logits =
+        logits_mode == "on" || (logits_mode == "auto" && DeclaresLogits(path));
     char error[2048] = {};
-    if (loom_text_embed_open(&embed_options, &embed_, error, sizeof(error)))
-      throw std::runtime_error(std::string("loom: ") + error);
+    if (loom_text_embed_open_ex(&embed_options, &embed_, error, sizeof(error))) {
+      if (embed_options.logits && logits_mode == "auto") {
+        // A package whose state cannot return rows still serves, as before.
+        std::fprintf(stderr,
+                     "loom: logits unavailable (%s); sampling stays on the "
+                     "device\n",
+                     error);
+        embed_options.logits = 0;
+        error[0] = 0;
+        if (loom_text_embed_open_ex(&embed_options, &embed_, error,
+                                    sizeof(error)))
+          throw std::runtime_error(std::string("loom: ") + error);
+      } else {
+        throw std::runtime_error(std::string("loom: ") + error);
+      }
+    }
     loom_text_embed_info(embed_, &info_);
+    loom_text_embed_logits_info(embed_, &logits_);
+    chat_config_ = LoadChatConfig(path);
     fingerprint_ = PackageFingerprint(path, preset);
   }
   ~LoomModel() {
@@ -124,6 +152,15 @@ public:
   LoomModel& operator=(const LoomModel&) = delete;
 
   [[nodiscard]] const loom_text_embed_info_t& info() const { return info_; }
+  // The package's chat dialect: the "chat" object of its llm_config.json,
+  // when it has one.
+  [[nodiscard]] const std::optional<json::Value>& chat_config() const {
+    return chat_config_;
+  }
+  // The logits capability of this load (enabled: rows can be read).
+  [[nodiscard]] const loom_text_embed_logits_info_t& logits() const {
+    return logits_;
+  }
   // The package's manifest and programs (and the preset): persisted state is
   // only valid for the same ones.
   [[nodiscard]] const std::string& Fingerprint() const { return fingerprint_; }
@@ -160,11 +197,44 @@ public:
 private:
   loom_text_embed_t* embed_{nullptr};
   loom_text_embed_info_t info_{};
+  loom_text_embed_logits_info_t logits_{};
+  std::optional<json::Value> chat_config_;
   mutable std::recursive_mutex mutex_;
   std::unordered_map<std::uint64_t, loom_text_embed_checkpoint_t*>
       checkpoints_;
   std::uint64_t next_checkpoint_{1};
   std::string fingerprint_;
+
+  // The "chat" object of the package's llm_config.json (the kit's input,
+  // which model.json lists so loom-fetch delivers it).
+  static std::optional<json::Value> LoadChatConfig(const std::string& path) {
+    const auto manifest = ManifestPath(path);
+    if (!manifest)
+      return std::nullopt;
+    std::ifstream in(manifest->parent_path() / "llm_config.json",
+                     std::ios::binary);
+    if (!in)
+      return std::nullopt;
+    const std::string text((std::istreambuf_iterator<char>(in)), {});
+    try {
+      const auto config = json::parse(text);
+      const auto* chat = config.find("chat");
+      if (chat != nullptr && chat->is_object())
+        return *chat;
+    } catch (const std::exception&) {
+    }
+    return std::nullopt;
+  }
+
+  // The card declares "llm.logits" (the package carries the readback).
+  static bool DeclaresLogits(const std::string& path) {
+    const auto manifest = ManifestPath(path);
+    if (!manifest)
+      return false;
+    std::ifstream in(*manifest, std::ios::binary);
+    const std::string text((std::istreambuf_iterator<char>(in)), {});
+    return text.find("\"llm.logits\"") != std::string::npos;
+  }
 
   static std::string PackageFingerprint(const std::string& path,
                                         const std::string& preset) {
@@ -217,6 +287,16 @@ public:
   std::optional<std::size_t> reasoning_budget;
   // The prompt ends inside an open reasoning block.
   bool opens_reasoning{false};
+  // The request's grammar can constrain this package's raw tokens: its
+  // reasoning markers and (when the request declares tools) its native
+  // tool-call syntax are the ones Gufo's grammars are written for.
+  bool constraint_ok{false};
+  // The marker that starts a native tool call (a lazy tool grammar restricts
+  // once it is written).
+  std::string lazy_open;
+  // The request declares tools with tool_choice auto and no response format:
+  // its grammar is lazy, free until the call marker has been written.
+  bool lazy_tools{false};
   [[nodiscard]] bool has_images() const { return !images.empty(); }
 };
 

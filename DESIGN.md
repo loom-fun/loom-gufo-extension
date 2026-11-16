@@ -76,13 +76,57 @@ claims `manifest:loom`, declares `--loom-device`, `--loom-memory-bytes` and
 Gufo's scheduler, prefix cache, parsers and every API endpoint drive the
 package's kernels unchanged.
 
+## Logits
+
+No Loom runtime change: `libloom_text_embed` is compiled inside Loom's tree and
+already downloads device allocations (checkpoint images), so the package only
+has to leave the logits somewhere the embed layer can read.
+
+- **Package side** (loom-skills starter kit). A package declares `llm.logits`
+  (card config, default false). With it true, the `outputs` allocation
+  (storage slot 5) also holds one full f32 logit row per span from byte
+  32768 on, row stride `ceil(vocab/128) * 512` bytes, written by the
+  `@llm_advance` stage for spans whose request carries `"logits": true`.
+  Default loads are unchanged by construction.
+- **Embed ABI 2.** `loom_text_embed_open_ex(..., logits = 1)` rewrites the
+  card's `llm.logits` to true in a private copy of the card (the package's
+  programs and parameters stay where they are); the logit region is located
+  from the allocation's size and checked. `"logits": true` in a request body
+  marks the row bound with it; after every selecting epoch the rows of marked
+  spans are downloaded in one transfer; `loom_text_embed_row_logits` returns
+  the row of the pending selection; `loom_text_embed_decode_batch_tokens`
+  runs an epoch on tokens the host chose; `loom_text_embed_is_stop_token`
+  tells the stop token. ABI 1 callers are unchanged.
+- **Runner.** A request needs the row when it carries a grammar this package
+  can take, `logprobs`, `min_p` or penalties. Such a row runs undrafted:
+  after the epoch that makes a selection the runner samples it from the row
+  with Gufo's `SamplerState` (mask, penalties, min-p, seed), publishes that
+  token and consumes it in the next epoch (`decode_batch_tokens`). The choice
+  is made one epoch early (right after the row exists) so end of output and
+  withheld tool calls are known with the last token, as on the device path.
+  Whether the next epoch must leave a row is decided from the sampler as it
+  will be once the token is accepted; a lazy tool grammar (`tool_choice`
+  auto) stays on the device until it restricts. Grammars constrain the model's own tokens, not the canonical
+  markup the runner publishes, so the runner describes the model's spelling to Gufo (`ToolGrammarSyntax` and
+  `ReasoningGrammarMarkers`, a small addition to the text runner contract in loom-fun/gufo): the package's
+  `llm_config.json` (listed in `model.json`, so loom-fetch delivers it) names its tool-call format and reasoning markers and `src/loom_dialect.hpp` maps them
+  to Gufo's `ToolSyntax` (Qwen XML, Hermes JSON, GLM tags, Gemma 4, OpenAI harmony, Llama JSON, Python-style call
+  lists with keyword arguments, and Glimmer's ATEM messages; the last two use the descriptor's `block_close` /
+  `call_separator`, `ValueSyntax::keyword_root` and `repeat_prefix`/`repeat_suffix`). Parsing of the published
+  markup is unchanged.
+- **Tests.** `tests/build_test.sh` builds the runner against a fake embed
+  library (a byte-level model with scripted logits) and checks the device path
+  is untouched, logprobs, penalties, min-p, seeds, JSON-schema and tool
+  grammars, lazy tool grammars, every dialect's grammar against the call text the
+  kit's chat templates render, dialect gating and mixed batches, without a GPU.
+
 ## Limits (and what removes them)
 
-- **Features that need logits:** `tool_choice` required/named, strict
-  schemas, `response_format` enforcement, logprobs, min_p and penalties.
-  Packages sample on device and logits never leave it; tools and JSON work
-  unconstrained, as in loom-serve. Next step: one Loom ABI addition (logits
-  readback or a host-sampling hook) and regenerated packages.
+- **Features that need logits** (`tool_choice` required/named, strict
+  schemas, `response_format` enforcement, logprobs, min_p, penalties) need a
+  package built with the loom-skills kit's opt-in logits readback; see
+  "Logits" below. Packages without it behave as before: they sample on device
+  and those requests are served unconstrained, as in loom-serve.
 - **Disk tier needs elastic state.** With `--cache-disk`, cache entries are
   portable checkpoint images; a preset without elastic pooled state keeps the
   cache in device memory (the runner says so at load).

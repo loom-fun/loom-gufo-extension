@@ -2,7 +2,7 @@
   "schema": 1,
   "name": "loom",
   "version": "0.1.0",
-  "api_version": ">= 0.3.15",
+  "api_version": ">= 0.3.16",
   "entry": "loom_register",
   "registration_target": "gufo_loom",
   "depends": [],
@@ -49,6 +49,20 @@
         "loom-text"
       ],
       "help": "Device memory Loom may use for weights and state (default: no limit)"
+    },
+    {
+      "name": "--loom-logits",
+      "type": "string",
+      "commands": [
+        "serve",
+        "prompt",
+        "chat",
+        "bench"
+      ],
+      "providers": [
+        "loom-text"
+      ],
+      "help": "Logits readback for host sampling (grammars, logprobs, min-p, penalties): auto, on or off (default: auto, on when the package declares it)"
     },
     {
       "name": "--loom-preset",

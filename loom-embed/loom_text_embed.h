@@ -21,7 +21,7 @@
 extern "C" {
 #endif
 
-#define LOOM_TEXT_EMBED_ABI_VERSION 1
+#define LOOM_TEXT_EMBED_ABI_VERSION 2
 
 typedef struct loom_text_embed_t loom_text_embed_t;
 typedef struct loom_text_embed_request_t loom_text_embed_request_t;
@@ -221,6 +221,73 @@ int loom_text_embed_checkpoint_import(
     loom_text_embed_t* embed, const loom_text_embed_checkpoint_info_t* info,
     const uint8_t* image, size_t size,
     loom_text_embed_checkpoint_t** out_checkpoint);
+
+
+//===----------------------------------------------------------------------===//
+// ABI 2: logits readback (opt-in; ABI 1 callers are unchanged).
+//===----------------------------------------------------------------------===//
+//
+// A package that declares the "llm.logits" capability can return the full
+// logit row of any selecting span, so the caller can choose the token itself
+// (grammar masks, logprobs, min-p, penalties). The capability is chosen at
+// load time (loom_text_embed_open_ex, logits = 1); loading without it, or any
+// load of a package that does not declare it, runs exactly as before.
+//
+// Per request: put "logits": true in the body given to chat_prepare (the
+// package's request options read it). row_begin / row_bind with that request
+// make the row a logit row: every epoch that selects for it also leaves its
+// full logit row, which loom_text_embed_row_logits returns for the row's
+// current pending selection. A logit row runs undrafted: use decode_batch /
+// decode_batch_tokens for it, never verify_batch.
+
+typedef struct loom_text_embed_options_ex_t {
+  // sizeof(loom_text_embed_options_ex_t), for forward compatibility.
+  uint32_t struct_size;
+  // The ABI 1 options.
+  loom_text_embed_options_t base;
+  // Nonzero opens the package with the logits capability on. Fails when the
+  // package does not declare "llm.logits" or its state cannot export rows.
+  uint32_t logits;
+} loom_text_embed_options_ex_t;
+
+int loom_text_embed_open_ex(const loom_text_embed_options_ex_t* options,
+                            loom_text_embed_t** out_embed, char* error,
+                            size_t error_size);
+
+typedef struct loom_text_embed_logits_info_t {
+  // The package declares "llm.logits" and its state can return rows.
+  uint32_t supported;
+  // This handle was opened with logits on.
+  uint32_t enabled;
+  // Floats per row: token ids 0..width-1; ids the head does not have hold
+  // a very negative value (<= -1e38).
+  uint32_t width;
+  // Most logit rows one epoch can return (its widest span count).
+  uint32_t max_rows;
+} loom_text_embed_logits_info_t;
+void loom_text_embed_logits_info(const loom_text_embed_t* embed,
+                                 loom_text_embed_logits_info_t* out_info);
+
+// Whether a prepared request asked for logits ("logits": true).
+int loom_text_embed_request_logits(const loom_text_embed_request_t* request);
+// Whether the row is a logit row (its last begin/bind request asked).
+int loom_text_embed_row_is_logit(loom_text_embed_t* embed, uint32_t row);
+
+// Copies the full logit row of the row's pending selection: *out_count floats
+// (at most capacity; capacity < width fails). Fails when the row is not a
+// logit row or has no selection yet.
+int loom_text_embed_row_logits(loom_text_embed_t* embed, uint32_t row,
+                               float* out, size_t capacity, size_t* out_count);
+
+// One packed epoch like decode_batch, but row i consumes tokens[i] instead of
+// its device selection (the caller chose it from the logits). Rows must be
+// distinct with a pending selection; they select their successors as usual.
+int loom_text_embed_decode_batch_tokens(loom_text_embed_t* embed,
+                                        const uint32_t* rows, size_t count,
+                                        const int32_t* tokens);
+// Whether a token ends the response (the package's stop token).
+int loom_text_embed_is_stop_token(const loom_text_embed_t* embed,
+                                  int32_t token);
 
 #ifdef __cplusplus
 }  // extern "C"

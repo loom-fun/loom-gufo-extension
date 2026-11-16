@@ -20,8 +20,11 @@ std::string_view MediaType(std::span<const std::uint8_t> bytes);
 json::Value ContentParts(const ext::ChatMessage& message);
 std::string ChatBody(const std::string& model, const ext::ChatRequest& request,
                      bool with_effort = true);
+// `logits` adds the package's documented request key ("logits": true), which
+// makes the row's selecting spans leave their full logit row.
 std::string SamplingBody(const std::string& model,
-                         const sampling::SamplingConfig& config);
+                         const sampling::SamplingConfig& config,
+                         bool logits = false);
 std::string ToolMarkup(std::string_view calls_json);
 
 }  // namespace gufo::loom
