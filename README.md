@@ -151,7 +151,7 @@ slower; every other request keeps the device path.
 ## Limits
 
 - In a container, run with `--security-opt seccomp=unconfined` (Loom's GPU memory reservation needs it).
-- Glimmer (Muse-Glimmer-30B): automatic tool choice is not constrained; required and named are.
+- gpt-oss and Glimmer: automatic tool choice is not grammar-constrained (the package parses the calls); required and named are.
 
 ## Development
 

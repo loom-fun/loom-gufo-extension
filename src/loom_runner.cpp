@@ -331,11 +331,14 @@ public:
     auto context = std::make_shared<LoomPromptContext>(model_, handle);
     tokens.resize(count);
     context->opens_reasoning = OpensReasoningLocked(tokens);
-    // Glimmer's call header (" to=NAME") starts like its answer header
-    // (" to=user"), so a lazy tool grammar cannot tell them apart: automatic
-    // tool use stays on the device, as it does for a package without a grammar.
+    // Automatic tool use stays on the device where a lazy grammar cannot
+    // follow the model: Glimmer's call header (" to=NAME") starts like its
+    // answer header (" to=user"), and gpt-oss may write a harmony call with the
+    // recipient before the channel (the order its template renders history in)
+    // as well as after it; the package's own parser reads either.
     const bool lazy_ambiguous =
-        native_.atem && request.tool_choice == ext::ChatRequest::ToolChoice::kAuto;
+        (native_.atem || native_.call_format == "harmony") &&
+        request.tool_choice == ext::ChatRequest::ToolChoice::kAuto;
     context->constraint_ok = model_->logits().enabled && reasoning_ok_ &&
                              (request.tools.empty() ||
                               (native_.tools && !lazy_ambiguous));
