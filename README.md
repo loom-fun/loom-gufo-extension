@@ -51,31 +51,23 @@ On Strix Halo (gfx1151) with the amdgpu driver, from the directory where you ran
 
 ```sh
 pipx install 'hrx-loom[hf]==0.1.0'     # loom-fetch (and loom-serve); pipx: `sudo apt install pipx` or `python3 -m pip install --user pipx`
-loom-fetch https://huggingface.co/loom-fun/ggml-org-Qwen3-4B-loom/resolve/main/model.json --output=models/qwen3-4b --no-input
+loom-fetch https://huggingface.co/loom-fun/ggml-org-Qwen3-4B-loom/resolve/main/model.json --preset chat --output=models/qwen3-4b --no-input
 gufo/build/gufo serve llm --model models/qwen3-4b --sessions 4     # listens on 127.0.0.1:8080 (--host, --port)
 curl -s localhost:8080/v1/chat/completions -H 'Content-Type: application/json' \
   -d '{"model":"Qwen/Qwen3-4B","messages":[{"role":"user","content":"Hello!"}]}'
 ```
 
-Any model in the table below works the same way: `loom-fetch https://huggingface.co/loom-fun/<repo>/resolve/main/model.json
---output=<dir> --no-input`. The request's `model` is the name in the table (`GET /v1/models` lists it). `loom-fetch`
-links the weights from the Hugging Face cache (`~/.cache/huggingface`), so the cache must stay where it was (and be
-mounted at the same path in a container); a package takes about its GGUF's size on disk.
+Any model in the table below works the same way: `loom-fetch
+https://huggingface.co/loom-fun/<repo>/resolve/main/model.json --preset chat --output=<dir> --no-input`. `chat` is the
+Strix Halo preset; packages tuned for the Radeon AI PRO R9700 also carry `chat-r9700`. Gufo serves the fetched preset
+without any flag. The request's `model` is the name in the table (`GET /v1/models` lists it). `loom-fetch` links the
+weights from the Hugging Face cache (`~/.cache/huggingface`), so the cache must stay where it was (and be mounted at
+the same path in a container); a package takes about its GGUF's size on disk.
 
-**Logits (until the next loom-fun release):** forced or named `tool_choice`, strict tool schemas, `response_format`,
-`logprobs`, `min_p` and penalties need packages that return logits. Those are in
-[loom-fun-staging](https://huggingface.co/loom-fun-staging) (the same repos as the table) until they are promoted to
-loom-fun. They carry two presets, so name the one for your GPU (`chat` is Strix Halo, `chat-r9700` the Radeon AI PRO
-R9700); Gufo serves the fetched preset without any flag:
-
-```sh
-loom-fetch https://huggingface.co/loom-fun-staging/unsloth-gpt-oss-20b-loom/resolve/main/model.json --preset chat \
-  --output=models/gpt-oss-20b --no-input
-```
-
-The server log then says `loom: logits on (...)`. Without logits those features are not enforced: a forced
-`tool_choice` returns an error (`tool_choice_unsatisfied`) when the model does not call, `response_format` is only
-asked of the model, and `logprobs`, `min_p` and penalties are ignored.
+**Logits:** forced or named `tool_choice`, strict tool schemas, `response_format`, `logprobs`, `min_p` and penalties
+need a package that returns logits, as the loom-fun packages do. The server log says `loom: logits on (...)`. Without
+logits those features are not enforced: a forced `tool_choice` returns an error (`tool_choice_unsatisfied`) when the
+model does not call, `response_format` is only asked of the model, and `logprobs`, `min_p` and penalties are ignored.
 
 ## Models
 
