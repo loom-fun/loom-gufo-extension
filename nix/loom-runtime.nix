@@ -50,7 +50,7 @@ let
     dontConfigure = true;
     buildPhase = ''
       runHook preBuild
-      python3 ${../hrx/hrx-deps.py} fetch . $out
+      python3 ${./hrx-deps.py} fetch . $out
       runHook postBuild
     '';
     dontInstall = true;
@@ -69,7 +69,7 @@ llvm.rocmClangStdenv.mkDerivation {
   inherit src;
 
   postPatch = ''
-    python3 ${../hrx/hrx-deps.py} rewrite . ${deps}
+    python3 ${./hrx-deps.py} rewrite . ${deps}
     # v0.1.0 also spells the ISA XML archive URL in CMake; use the fetched copy.
     substituteInPlace loom/src/loom/target/arch/amdgpu/descriptors/CMakeLists.txt \
       --replace-fail "https://gpuopen.com/download/AMD_GPU_MR_ISA_XML_2026_03_05.zip" \
