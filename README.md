@@ -16,14 +16,15 @@ extra-substituters = https://gufo.cachix.org
 extra-trusted-public-keys = gufo.cachix.org-1:rfZe3n4lHINgyoACKzs5EthIZmBNvEyCCtufUpth0PE=
 ```
 
-Then, in an empty directory (a few minutes with the cache):
+Then, in an empty directory (a few minutes with the cache). Gufo's side of the extension API is in
+[gufo-org/gufo#1243](https://github.com/gufo-org/gufo/pull/1243); until it merges, build Gufo from its branch:
 
 ```sh
-git clone -b loom-extension https://github.com/loom-fun/gufo
+git clone -b upstream/loom-extension-support https://github.com/loom-fun/gufo
 git clone https://github.com/loom-fun/loom-gufo-extension
 cd gufo
 LOOM=$(nix build --impure --no-link --print-out-paths --expr \
-  "((builtins.getFlake \"path:$PWD\").packages.x86_64-linux.loom-runtime.override { embed = $PWD/../loom-gufo-extension/loom-embed; })")
+  "import $PWD/../loom-gufo-extension/nix/runtime.nix { gufo = builtins.getFlake \"path:$PWD\"; }")
 nix develop --impure --expr "(builtins.getFlake \"path:$PWD\").packages.x86_64-linux.default" --command bash -c "
   export PKG_CONFIG_PATH=$LOOM/lib/pkgconfig:\$PKG_CONFIG_PATH && eval \"\$preConfigure\" &&
   cmake -S . -B build -G Ninja \$cmakeFlags -DENGINE_ENABLE_HIP=ON -DGUFO_EXTENSIONS=loom \
