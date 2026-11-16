@@ -1,43 +1,14 @@
 # loom-gufo-extension
 
-Runs [loom-fun](https://huggingface.co/loom-fun) Loom model packages in
-[Gufo](https://github.com/gufo-org/gufo) on Strix Halo, as ordinary Gufo text
-models: Gufo's server, scheduler, sampler policy, tool/reasoning parsing and
-CLI options, with the package's own Loom kernels, chat program, tokenizer and
-drafter doing the model work.
-
-## Quick start
-
-Needs Linux x86-64 on Strix Halo (gfx1151) with the amdgpu driver, and a Gufo built with this extension (see
-"Build" below; run these next to the `gufo` checkout).
-
-```sh
-pipx install 'hrx-loom[hf]==0.1.0'     # loom-fetch (and loom-serve), from Loom 0.1.0
-loom-fetch https://huggingface.co/loom-fun/ggml-org-Qwen3-4B-loom/resolve/main/model.json --output=models/qwen3-4b --no-input
-gufo/build/gufo serve llm --model models/qwen3-4b --sessions 4
-curl -s localhost:8080/v1/chat/completions -H 'Content-Type: application/json' \
-  -d '{"model":"Qwen/Qwen3-4B","messages":[{"role":"user","content":"Hello!"}]}'
-```
-
-Every model in the table below works the same way: `loom-fetch https://huggingface.co/loom-fun/<repo>/resolve/main/model.json --output=<dir> --no-input`.
-
-**Logits (until the next loom-fun release):** packages that also return logits, which Gufo's grammars
-(`tool_choice` required/named, strict schemas, `response_format`), `logprobs`, `min_p` and penalties need, are in
-[loom-fun-staging](https://huggingface.co/loom-fun-staging) until they are promoted to loom-fun. They carry two
-presets, so name the one for your GPU:
-
-```sh
-loom-fetch https://huggingface.co/loom-fun-staging/ggml-org-Qwen3-4B-loom/resolve/main/model.json --preset chat \
-  --output=models/qwen3-4b --no-input
-```
-
-(`--preset chat` is Strix Halo; `chat-r9700` is the Radeon AI PRO R9700.) Without logits, those requests are served
-unconstrained, as loom-serve serves them.
+Runs [loom-fun](https://huggingface.co/loom-fun) Loom model packages in [Gufo](https://github.com/gufo-org/gufo) on
+Strix Halo as ordinary Gufo text models: Gufo's server, API endpoints, prompt cache and parsers, with the package's
+own Loom kernels doing the model work. It builds against the `loom-extension` branch of
+[loom-fun/gufo](https://github.com/loom-fun/gufo/tree/loom-extension), a fork of Gufo that adds model-directory support.
 
 ## Build
 
-Needs [Nix](https://nixos.org/download/) with flakes. Gufo's binary cache avoids building ROCm's LLVM from source
-(hours): add it to `/etc/nix/nix.conf` (then restart the Nix daemon), or put the same lines in `NIX_CONFIG`:
+Needs Linux x86-64 and [Nix](https://nixos.org/download/) with flakes. Gufo's binary cache avoids building ROCm's LLVM
+from source (hours): put these lines in `/etc/nix/nix.conf` (and restart the Nix daemon), or in `NIX_CONFIG`:
 
 ```
 experimental-features = nix-command flakes
@@ -45,7 +16,7 @@ extra-substituters = https://gufo.cachix.org
 extra-trusted-public-keys = gufo.cachix.org-1:rfZe3n4lHINgyoACKzs5EthIZmBNvEyCCtufUpth0PE=
 ```
 
-Then, in an empty directory (the build takes about 15 minutes):
+Then, in an empty directory (a few minutes with the cache):
 
 ```sh
 git clone -b loom-extension https://github.com/loom-fun/gufo
@@ -59,17 +30,57 @@ nix develop --impure --expr "(builtins.getFlake \"path:$PWD\").packages.x86_64-l
     -DGUFO_EXTENSION_DIRS=$PWD/../loom-gufo-extension &&
   cmake --build build --target gufo"
 build/gufo diagnose --section extensions     # lists "provider loom-text: available"
+cd ..
 ```
 
-The model-directory support it needs is on the `loom-extension` branch of
-[loom-fun/gufo](https://github.com/loom-fun/gufo/tree/loom-extension). Design and evidence: `DESIGN.md`; validation
-clients and results: `validation/`.
+No Nix on the machine (or no root)? Run the same commands in the `nixos/nix` image, keeping `/nix` in a named volume so
+the built binary's libraries are still there when you serve:
+
+```sh
+docker run --rm -it -v gufo-nix:/nix -v $PWD:$PWD -w $PWD -e NIX_CONFIG="$(printf '%s\n' \
+  'experimental-features = nix-command flakes' 'extra-substituters = https://gufo.cachix.org' \
+  'extra-trusted-public-keys = gufo.cachix.org-1:rfZe3n4lHINgyoACKzs5EthIZmBNvEyCCtufUpth0PE=')" nixos/nix bash
+```
+
+To serve from it, add `--device /dev/kfd --device /dev/dri --security-opt seccomp=unconfined --network host`, and mount
+the Hugging Face cache at the same path (see Quick start).
+
+## Quick start
+
+On Strix Halo (gfx1151) with the amdgpu driver, from the directory where you ran Build (it holds `gufo/`):
+
+```sh
+pipx install 'hrx-loom[hf]==0.1.0'     # loom-fetch (and loom-serve); pipx: `sudo apt install pipx` or `python3 -m pip install --user pipx`
+loom-fetch https://huggingface.co/loom-fun/ggml-org-Qwen3-4B-loom/resolve/main/model.json --output=models/qwen3-4b --no-input
+gufo/build/gufo serve llm --model models/qwen3-4b --sessions 4     # listens on 127.0.0.1:8080 (--host, --port)
+curl -s localhost:8080/v1/chat/completions -H 'Content-Type: application/json' \
+  -d '{"model":"Qwen/Qwen3-4B","messages":[{"role":"user","content":"Hello!"}]}'
+```
+
+Any model in the table below works the same way: `loom-fetch https://huggingface.co/loom-fun/<repo>/resolve/main/model.json
+--output=<dir> --no-input`. The request's `model` is the name in the table (`GET /v1/models` lists it). `loom-fetch`
+links the weights from the Hugging Face cache (`~/.cache/huggingface`), so the cache must stay where it was (and be
+mounted at the same path in a container); a package takes about its GGUF's size on disk.
+
+**Logits (until the next loom-fun release):** forced or named `tool_choice`, strict tool schemas, `response_format`,
+`logprobs`, `min_p` and penalties need packages that return logits. Those are in
+[loom-fun-staging](https://huggingface.co/loom-fun-staging) (the same repos as the table) until they are promoted to
+loom-fun. They carry two presets, so name the one for your GPU (`chat` is Strix Halo, `chat-r9700` the Radeon AI PRO
+R9700); Gufo serves the fetched preset without any flag:
+
+```sh
+loom-fetch https://huggingface.co/loom-fun-staging/unsloth-gpt-oss-20b-loom/resolve/main/model.json --preset chat \
+  --output=models/gpt-oss-20b --no-input
+```
+
+The server log then says `loom: logits on (...)`. Without logits those features are not enforced: a forced
+`tool_choice` returns an error (`tool_choice_unsatisfied`) when the model does not call, `response_format` is only
+asked of the model, and `logprobs`, `min_p` and penalties are ignored.
 
 ## Models
 
 The loom-fun packages of 35B parameters or less, on Strix Halo. Loom: through Gufo with this extension, a 32,000-token
 prompt for pp32k and single-stream decode after a short prompt. llama.cpp (ROCm b1374): the package card's baseline.
-Gemma 4 31B's pp32k did not fit in memory next to other work on the test machine.
 
 | Model | Loom pp32k (tok/s) | llama.cpp pp32k (tok/s) | Loom decode (tok/s) | llama.cpp decode (tok/s) |
 |---|---|---|---|---|
@@ -109,7 +120,7 @@ Gemma 4 31B's pp32k did not fit in memory next to other work on the test machine
 | [Qwen/Qwen3-Coder-30B-A3B-Instruct](https://huggingface.co/loom-fun/ggml-org-Qwen3-Coder-30B-A3B-Instruct-loom) | 899 | 648 | 64.0 | 28.9 |
 | [qwen3.8-27b](https://huggingface.co/loom-fun/bartowski-Qwen3.8-27B-loom) | 442 | 294 | 21.1 | 21.1 |
 | [Qwen/Qwen3-30B-A3B-Instruct-2507](https://huggingface.co/loom-fun/unsloth-Qwen3-30B-A3B-Instruct-2507-loom) | 911 | 635 | 84.3 | 76.5 |
-| [google/gemma-4-31B-it](https://huggingface.co/loom-fun/unsloth-gemma-4-31B-it-loom) | — | 195 | 20.2 | 16.1 |
+| [google/gemma-4-31B-it](https://huggingface.co/loom-fun/unsloth-gemma-4-31B-it-loom) | 282 | 195 | 20.2 | 16.1 |
 | [Qwen/Qwen2.5-32B-Instruct](https://huggingface.co/loom-fun/bartowski-Qwen2.5-32B-Instruct-loom) | 274 | 175 | 11.2 | 11.2 |
 | [poolside/Laguna-XS-2.1](https://huggingface.co/loom-fun/ggml-org-Laguna-XS-2.1-loom) | 1376 | 636 | 41.1 | 49.5 |
 | [Nanbeige/Nanbeige4.3-33B](https://huggingface.co/loom-fun/bartowski-Nanbeige4.3-33B-loom) | 259 | 186 | 11.0 | 10.6 |
@@ -128,15 +139,14 @@ Gufo serves a Loom package like any other model: its server, scheduler, prompt c
 unchanged. The extension runs the package's own kernels, chat template, tokenizer and drafter through a small C
 library (`loom-embed/`) over Loom's text model layer. Details: `DESIGN.md`.
 
-Options: `--loom-device URI`, `--loom-memory-bytes N`, `--loom-preset NAME`, `--loom-logits auto|on|off`.
+Options: `--loom-device URI`, `--loom-memory-bytes N` (default: no limit; a small budget can refuse long prompts),
+`--loom-preset NAME` (only for a package directory that holds several presets), `--loom-logits auto|on|off`.
 `--cache-disk DIR` keeps the prompt cache across restarts.
 
 ## Logits
 
-Forced or named `tool_choice`, strict tool schemas, `response_format`, `logprobs`, `min_p` and penalties need the
-model's logits. They just work with packages that return logits (loom-fun-staging until the next release, see
-Quick start); with other packages those requests are served unconstrained, as loom-serve serves them. A request that
-uses them samples on the host without drafting, so it decodes somewhat slower.
+Requests that need logits (see Quick start) sample on the host and run without drafting, so they decode somewhat
+slower; every other request keeps the device path.
 
 ## Limits
 
