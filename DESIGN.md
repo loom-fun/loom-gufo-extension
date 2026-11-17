@@ -45,13 +45,15 @@ directory goes to the provider whose existing `probe` claims it
 (`ext::ProbeModelDirectory`), which creates its ordinary step runner
 (`create`) with no GGUF reader. `serve` takes that path in
 `inference_backend.cpp`. `prompt`, `chat` and `bench` take it through
-`runner_cli.cpp`, which runs the server's backend in-process. Packaging adds
-`.#loom-runtime`, a Nix package that builds hrx-system v0.1.0 (the release
-loom-fun targets) with the embedding library; `withTools = true` adds
-loom-serve and loom-fetch for side-by-side comparisons.
+`runner_cli.cpp`, which runs the server's backend in-process. Packaging is
+this repository's `nix/runtime.nix`, a Nix package that builds hrx-system
+v0.2.0 (the release loom-fun targets) with the embedding library, with the
+nixpkgs Gufo pins; `withTools = true` adds loom-serve and loom-fetch for
+side-by-side comparisons.
 
 **Loom:** no source change. `libloom_text_embed.so` (about 1,000 lines of C
-in the extension's `loom-embed/`) is compiled inside Loom's tree from the
+in the extension's `loom-embed/`) is compiled in Loom's CMake build (HRX
+includes `loom-embed/loom_text_embed.cmake` once its targets exist) from the
 existing text model layer:
 
 - package loading via `model_configuration_load`/`resolve` and
@@ -128,15 +130,17 @@ has to leave the logits somewhere the embed layer can read.
   "Logits" below. Packages without it behave as before: they sample on device
   and those requests are served unconstrained, as in loom-serve.
 - **Disk tier needs elastic state.** With `--cache-disk`, cache entries are
-  portable checkpoint images; a preset without elastic pooled state keeps the
-  cache in device memory (the runner says so at load).
+  portable checkpoint images, which need Loom's elastic pool: the extension
+  uses it then (otherwise a fixed pool, as the loom-fun cards serve). A preset
+  whose state still cannot be imaged keeps the cache in device memory (the
+  runner says so at load).
 - **Greedy outputs can differ from loom-serve at near-ties.** Loom's results
   depend on batch shape (drafted verify windows, prefill chunks); loom-serve
   itself gives a different greedy haiku for Qwen3-8B under load.
 - **Containers need `--security-opt seccomp=unconfined`**, because Loom's GPU
   memory reservation fails under Docker's default profile.
 
-## Evidence (Strix Halo gfx1151, 2026-11-14)
+## Evidence (Strix Halo gfx1151, 2026-11-14, Loom 0.1.0)
 
 Both servers ran the same package, the same Loom build (hrx-system v0.1.0
 via Nix) and identical requests (`bench.py`): greedy, thinking off, three

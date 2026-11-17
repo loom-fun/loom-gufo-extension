@@ -1,11 +1,11 @@
 # Running the logits checks on a GPU runner (Strix Halo and Radeon AI PRO R9700)
 
-How the Gufo logits checks run on a CI runner that has a GPU but no Nix or Docker (AMD DevLab Dispatch). The Nix change that builds
-the embed library for both GPUs is in loom-fun/gufo (`gpuTargets`, branch `logits-targets`).
+How the Gufo logits checks run on a CI runner that has a GPU but no Nix or Docker (AMD DevLab Dispatch). The embed library is
+built by this repository's `nix/runtime.nix` (Loom 0.2.0) and serves both GPUs.
 
 ## What runs where
-- **No Nix or Docker on the runner.** Everything is built on a dev box and shipped as one tarball (the bundle): a gufo built with its HIP backend (a CPU-only gufo answers "HIP engine is disabled" at load: the serve stack is compiled only with it; the Nix closure comes from gufo.cachix.org, the build takes minutes) with the loom extension, `libloom_text_embed.so` (Loom's text model layer, built inside hrx-system v0.1.0 for
-  `gfx1151` and `gfx1201`), every shared library they need and the loader. `run.sh` starts a program through the bundled loader
+- **No Nix or Docker on the runner.** Everything is built on a dev box and shipped as one tarball (the bundle): a gufo built with its HIP backend (a CPU-only gufo answers "HIP engine is disabled" at load: the serve stack is compiled only with it; the Nix closure comes from gufo.cachix.org, the build takes minutes) with the loom extension, `libloom_text_embed.so` (Loom's text model layer, built with hrx-system v0.2.0; one
+  library serves `gfx1151` and `gfx1201`), every shared library they need and the loader. `run.sh` starts a program through the bundled loader
   and libraries, so the runner contributes only the kernel (amdgpu driver, `/dev/kfd`, `/dev/dri/renderD*`) and Python 3.
   The model work is Loom's (device code inside the embed library); gufo's own HIP kernels are not used by the extension.
 - **Two programs, two levels.**
@@ -23,13 +23,13 @@ the embed library for both GPUs is in loom-fun/gufo (`gpuTargets`, branch `logit
 
 ## Build the bundle (dev box, once per change of the embed, the runner or the extension)
 ```sh
-git clone -b logits-readback https://github.com/loom-fun/loom-gufo-extension ext
-git clone -b logits-targets  https://github.com/loom-fun/gufo gufo          # base loom-extension + gpuTargets
-ext/validation/devlab/build_bundle.sh gufo OUT_DIR "gfx1151 gfx1201"
+git clone https://github.com/loom-fun/loom-gufo-extension ext
+git clone -b upstream/loom-extension-support https://github.com/loom-fun/gufo gufo    # gufo-org/gufo#1243
+ext/validation/devlab/build_bundle.sh gufo OUT_DIR
 # -> OUT_DIR/gufo-loom-<gufo rev>-<extension rev>.tar.gz (+ .sha256), ~300 MB
 ```
-First run builds ROCm's LLVM from source inside the `nixos/nix` image (about 40 minutes on 24 cores, ~60 GB of disk in the docker
-volume `loom-bundle-nix`); later runs reuse the volume (embed + gufo: about 15 minutes). The bundle runs anywhere with a Linux
+Everything builds inside the `nixos/nix` image, with Gufo's ROCm toolchain from gufo.cachix.org (the docker volume
+`loom-bundle-nix` keeps the store); Loom builds from source without ROCm (embed + gufo: about 20 minutes). The bundle runs anywhere with a Linux
 x86-64 kernel and the amdgpu driver; `run.sh gufo --version` works without a GPU.
 
 ## Ship it to the runner

@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "name": "loom",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "api_version": ">= 0.3.16",
   "entry": "loom_register",
   "registration_target": "gufo_loom",
@@ -48,7 +48,7 @@
       "providers": [
         "loom-text"
       ],
-      "help": "Device memory Loom may use for weights and state (default: no limit)"
+      "help": "Budget for an elastic Loom memory pool (weights and state); default: none, a fixed pool committed at load"
     },
     {
       "name": "--loom-logits",

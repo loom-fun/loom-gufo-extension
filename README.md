@@ -2,8 +2,9 @@
 
 Runs [loom-fun](https://huggingface.co/loom-fun) Loom model packages in [Gufo](https://github.com/gufo-org/gufo) on
 Strix Halo as ordinary Gufo text models: Gufo's server, API endpoints, prompt cache and parsers, with the package's
-own Loom kernels doing the model work. It builds against the `loom-extension` branch of
-[loom-fun/gufo](https://github.com/loom-fun/gufo/tree/loom-extension), a fork of Gufo that adds model-directory support.
+own Loom kernels doing the model work. It runs Loom SDK 0.2.0 (`hrx-loom` 0.2.0, ROCm/hrx-system v0.2.0) and the
+loom-fun packages built for it, and builds against Gufo's model-directory support
+([gufo-org/gufo#1243](https://github.com/gufo-org/gufo/pull/1243)).
 
 ## Build
 
@@ -16,7 +17,8 @@ extra-substituters = https://gufo.cachix.org
 extra-trusted-public-keys = gufo.cachix.org-1:rfZe3n4lHINgyoACKzs5EthIZmBNvEyCCtufUpth0PE=
 ```
 
-Then, in an empty directory (a few minutes with the cache). Gufo's side of the extension API is in
+Then, in an empty directory (a few minutes with the cache; Loom itself builds from source in a few more and needs no
+ROCm). Gufo's side of the extension API is in
 [gufo-org/gufo#1243](https://github.com/gufo-org/gufo/pull/1243); until it merges, build Gufo from its branch:
 
 ```sh
@@ -43,27 +45,27 @@ docker run --rm -it -v gufo-nix:/nix -v $PWD:$PWD -w $PWD -e NIX_CONFIG="$(print
   'extra-trusted-public-keys = gufo.cachix.org-1:rfZe3n4lHINgyoACKzs5EthIZmBNvEyCCtufUpth0PE=')" nixos/nix bash
 ```
 
-To serve from it, add `--device /dev/kfd --device /dev/dri --security-opt seccomp=unconfined --network host`, and mount
-the Hugging Face cache at the same path (see Quick start).
+To serve from it, add `--device /dev/kfd --device /dev/dri --security-opt seccomp=unconfined --ulimit memlock=-1
+--network host`, and mount the Hugging Face cache at the same path (see Quick start and Limits).
 
 ## Quick start
 
 On Strix Halo (gfx1151) with the amdgpu driver, from the directory where you ran Build (it holds `gufo/`):
 
 ```sh
-pipx install 'hrx-loom[hf]==0.1.0'     # loom-fetch (and loom-serve); pipx: `sudo apt install pipx` or `python3 -m pip install --user pipx`
-loom-fetch https://huggingface.co/loom-fun/ggml-org-Qwen3-4B-loom/resolve/main/model.json --preset chat --output=models/qwen3-4b --no-input
+pipx install 'hrx-loom[hf]==0.2.0'     # loom-fetch (and loom-serve); pipx: `sudo apt install pipx` or `python3 -m pip install --user pipx`
+loom-fetch huggingface:loom-fun/ggml-org-Qwen3-4B-loom:chat --output=models/qwen3-4b --no-input
 gufo/build/gufo serve llm --model models/qwen3-4b --sessions 4     # listens on 127.0.0.1:8080 (--host, --port)
 curl -s localhost:8080/v1/chat/completions -H 'Content-Type: application/json' \
   -d '{"model":"Qwen/Qwen3-4B","messages":[{"role":"user","content":"Hello!"}]}'
 ```
 
-Any model in the table below works the same way: `loom-fetch
-https://huggingface.co/loom-fun/<repo>/resolve/main/model.json --preset chat --output=<dir> --no-input`. `chat` is the
-Strix Halo preset; packages tuned for the Radeon AI PRO R9700 also carry `chat-r9700`. Gufo serves the fetched preset
-without any flag. The request's `model` is the name in the table (`GET /v1/models` lists it). `loom-fetch` links the
-weights from the Hugging Face cache (`~/.cache/huggingface`), so the cache must stay where it was (and be mounted at
-the same path in a container); a package takes about its GGUF's size on disk.
+Any model in the table below works the same way: `loom-fetch huggingface:loom-fun/<repo>:chat --output=<dir>
+--no-input`. `chat` is the Strix Halo preset; packages tuned for the Radeon AI PRO R9700 also carry `chat-r9700`
+(`huggingface:loom-fun/<repo>:chat-r9700`). Gufo serves the fetched preset without any flag. Packages need Loom 0.2.0:
+fetch them again if they were fetched for 0.1.0. The request's `model` is the name in the table (`GET /v1/models` lists
+it). `loom-fetch` links the weights from the Hugging Face cache (`~/.cache/huggingface`), so the cache must stay where
+it was (and be mounted at the same path in a container); a package takes about its GGUF's size on disk.
 
 **Logits:** forced or named `tool_choice`, strict tool schemas, `response_format`, `logprobs`, `min_p` and penalties
 need a package that returns logits, as the loom-fun packages do. The server log says `loom: logits on (...)`. Without
@@ -73,7 +75,8 @@ model does not call, `response_format` is only asked of the model, and `logprobs
 ## Models
 
 The loom-fun packages of 35B parameters or less, on Strix Halo. Loom: through Gufo with this extension, a 32,000-token
-prompt for pp32k and single-stream decode after a short prompt. llama.cpp (ROCm b1374): the package card's baseline.
+prompt for pp32k and single-stream decode after a short prompt (measured 2026-11-16 with Loom 0.1.0). llama.cpp (ROCm
+b1374): the package card's baseline.
 
 | Model | Loom pp32k (tok/s) | llama.cpp pp32k (tok/s) | Loom decode (tok/s) | llama.cpp decode (tok/s) |
 |---|---|---|---|---|
@@ -132,9 +135,11 @@ Gufo serves a Loom package like any other model: its server, scheduler, prompt c
 unchanged. The extension runs the package's own kernels, chat template, tokenizer and drafter through a small C
 library (`loom-embed/`) over Loom's text model layer. Details: `DESIGN.md`.
 
-Options: `--loom-device URI`, `--loom-memory-bytes N` (default: no limit; a small budget can refuse long prompts),
-`--loom-preset NAME` (only for a package directory that holds several presets), `--loom-logits auto|on|off`.
-`--cache-disk DIR` keeps the prompt cache across restarts.
+Options: `--loom-device URI`, `--loom-memory-bytes N` (default: none, and Loom's memory pool is committed at load, as
+the loom-fun cards serve; N makes it an elastic pool with that budget, which prefills slower on 0.2.0 and can refuse
+long prompts when small), `--loom-preset NAME` (only for a package directory that holds several presets),
+`--loom-logits auto|on|off`. `--cache-disk DIR` keeps the prompt cache across restarts (its checkpoint images need the
+elastic pool, which the extension then uses).
 
 ## Logits
 
@@ -144,6 +149,10 @@ slower; every other request keeps the device path.
 ## Limits
 
 - In a container, run with `--security-opt seccomp=unconfined` (Loom's GPU memory reservation needs it).
+- Loom streams weights from disk through pinned buffers, which need a locked-memory limit (`ulimit -l`) of at least
+  64 MiB. Below that (stock Ubuntu: 8 MiB, also Docker's default) the extension reads the weights into host memory at
+  load instead, as `loom-serve --parameter_mode=preload` does, so loading takes about the weights' size in extra RAM.
+  Raise the limit (`ulimit -l unlimited`, `LimitMEMLOCK=infinity`, Docker `--ulimit memlock=-1`) to stream them.
 - gpt-oss and Glimmer: automatic tool choice is not grammar-constrained (the package parses the calls); required and named are.
 
 ## Development

@@ -33,7 +33,8 @@ typedef struct loom_text_embed_options_t {
   const char* preset;
   // Loom device URI; NULL selects amdgpu with an active completion wait.
   const char* device_uri;
-  // Shared parameter/state budget in bytes; zero imposes no limit.
+  // Shared parameter/state budget in bytes (elastic backing); zero imposes no
+  // limit.
   uint64_t memory_bytes;
   // Resident rows (concurrent sessions); zero keeps the preset's count.
   uint32_t rows;
@@ -248,6 +249,10 @@ typedef struct loom_text_embed_options_ex_t {
   // Nonzero opens the package with the logits capability on. Fails when the
   // package does not declare "llm.logits" or its state cannot export rows.
   uint32_t logits;
+  // Nonzero backs state with Loom's elastic pool even without memory_bytes
+  // (checkpoint images need it). Zero: a fixed pool, committed at load, unless
+  // memory_bytes sets a budget (which needs elastic backing).
+  uint32_t elastic;
 } loom_text_embed_options_ex_t;
 
 int loom_text_embed_open_ex(const loom_text_embed_options_ex_t* options,
