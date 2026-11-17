@@ -1542,7 +1542,8 @@ std::shared_ptr<ext::TextModelRunner> CreateLoomRunner(
     const ext::TextRunnerOptions& options, std::string* error) {
   try {
     auto model = std::make_shared<LoomModel>(
-        options.model_path, options.provider_options, options.session_count);
+        options.model_path, options.provider_options, options.session_count,
+        !options.disk_cache.directory.empty());
     return std::make_shared<LoomRunner>(
         std::move(model), options.max_context,
         !options.disk_cache.directory.empty(),

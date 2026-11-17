@@ -13,4 +13,5 @@ for comparison) through its public APIs. Each takes the server's base URL.
 | `disk_check.py BASE OUT.json first\|second` | disk tier: run on a server with `--cache-disk`, restart it, run `second`; passes when the restarted server reuses the prompt from disk with the same greedy answer (`disk_test.py` is the request) |
 | `thinkoff.py`, `haikuload.py` | thinking-off handling; greedy variance of loom-serve under load |
 
-Results from 2026-11-14 (Strix Halo, gfx1151, hrx-loom 0.1.0): `results/`.
+Results in `results/`: `conformance.md` (Loom 0.2.0, 2026-11-17, and the full 0.1.0 run of 2026-11-14), `bench.md` and
+`logits.md` (Loom 0.1.0, Strix Halo gfx1151).

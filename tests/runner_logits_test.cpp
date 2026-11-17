@@ -52,7 +52,7 @@ public:
     if (!logits)
       options["--loom-logits"] = std::string("off");
     fake::state().epochs.clear();
-    model = std::make_shared<LoomModel>(dir_.string(), options, rows);
+    model = std::make_shared<LoomModel>(dir_.string(), options, rows, false);
     runner = std::make_unique<LoomRunner>(model, 0, false, 0);
     pool = std::make_shared<RowPool>();
     pool->used.assign(rows, false);

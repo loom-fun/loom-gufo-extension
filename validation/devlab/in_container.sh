@@ -1,5 +1,5 @@
 #!/bin/sh
-# Inside nixos/nix (see build_bundle.sh): loom-runtime for $TARGETS, CPU gufo with the loom extension, bundle in /out/$NAME.
+# Inside nixos/nix (see build_bundle.sh): loom-runtime (nix/runtime.nix), gufo with the loom extension, bundle in /out/$NAME.
 set -eu
 mkdir -p /build /root/.config/nix
 cat > /root/.config/nix/nix.conf <<EOF
@@ -12,9 +12,8 @@ extra-substituters = https://gufo.cachix.org
 extra-trusted-public-keys = gufo.cachix.org-1:rfZe3n4lHINgyoACKzs5EthIZmBNvEyCCtufUpth0PE=
 EOF
 git config --global --add safe.directory '*'
-targets=$(for t in $TARGETS; do printf '"%s" ' "$t"; done)
 RT=$(nix build -L --impure --no-link --print-out-paths --expr \
-  "((builtins.getFlake \"path:/src/gufo\").packages.x86_64-linux.loom-runtime.override { embed = /ext/loom-embed; gpuTargets = [ $targets ]; })")
+  "import /ext/nix/runtime.nix { gufo = builtins.getFlake \"path:/src/gufo\"; }")
 echo "loom-runtime: $RT"
 # gufo's configure needs the NPU runtime (XRT)
 XRT=$(nix build -L --no-link --print-out-paths /src/gufo#xrt-amdxdna 2>/dev/null || nix build -L --no-link --print-out-paths "path:/src/gufo#xrt-amdxdna")

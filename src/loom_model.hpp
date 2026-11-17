@@ -89,7 +89,7 @@ inline bool ProbeLoomText(std::string_view model_root) {
 class LoomModel {
 public:
   LoomModel(const std::string& path, const ext::ParsedOptions& options,
-            std::size_t sessions) {
+            std::size_t sessions, bool checkpoint_images) {
     std::string preset, device;
     std::uint64_t memory = 0;
     if (const auto* value =
@@ -121,6 +121,8 @@ public:
     };
     embed_options.logits =
         logits_mode == "on" || (logits_mode == "auto" && DeclaresLogits(path));
+    // A disk tier stores checkpoint images, which need elastic state.
+    embed_options.elastic = checkpoint_images;
     char error[2048] = {};
     if (loom_text_embed_open_ex(&embed_options, &embed_, error, sizeof(error))) {
       if (embed_options.logits && logits_mode == "auto") {
