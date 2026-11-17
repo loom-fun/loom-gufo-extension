@@ -1504,49 +1504,93 @@ static iree_status_t loom_text_embed_image_plan(
         state->recurrent.buffers[recurrent_slot == UINT32_MAX ? 0
                                                               : recurrent_slot];
   }
+  // Loom merges consecutive physical pages into one range (and may group
+  // capture and restore differently), so its ranges are split back into one
+  // range per block and plane: the image layout must not depend on page IDs.
+  iree_host_size_t merged_count = 0;
+  loom_runtime_snapshot_range_t* merged = NULL;
   IREE_RETURN_IF_ERROR(loom_serve_text_storage_plan_snapshot(
       storage, state->row_count + checkpoint_index, views, true, block_count,
-      blocks, state->host_allocator, &out_plan->count, &out_plan->device));
-  iree_status_t status = iree_allocator_malloc_array(
-      state->host_allocator, out_plan->count, sizeof(*out_plan->image),
-      (void**)&out_plan->image);
-  if (!iree_status_is_ok(status)) {
-    iree_allocator_free(state->host_allocator, out_plan->device);
-    out_plan->device = NULL;
-    return status;
-  }
+      blocks, state->host_allocator, &merged_count, &merged));
   const iree_host_size_t fixed_count =
       (views[TEXT_RECURRENT - TEXT_CONTROL] ? 1 : 0) +
       (storage->carry_stride ? 1 : 0);
-  uint64_t fixed = 0, page = 0;
-  for (iree_host_size_t i = 0; i < fixed_count; ++i) {
-    out_plan->image[i] = (loom_runtime_snapshot_range_t){
-        0, fixed, out_plan->device[i].length};
-    fixed += out_plan->device[i].length;
-  }
+  uint64_t page = 0;
+  iree_host_size_t unit_count = 0;
   for (iree_host_size_t r = 0; r < storage->region_count; ++r) {
     page += (uint64_t)storage->regions[r].blocks.count *
             storage->regions[r].blocks.block_bytes;
+    unit_count += storage->regions[r].blocks.count;
   }
-  iree_host_size_t i = fixed_count;
-  uint64_t unit_offset = 0;
-  for (iree_host_size_t r = 0; r < storage->region_count; ++r) {
+  out_plan->count = fixed_count + unit_count * block_count;
+  iree_status_t status =
+      merged_count < fixed_count
+          ? iree_make_status(IREE_STATUS_INTERNAL,
+                             "snapshot plan has no fixed ranges")
+          : iree_ok_status();
+  if (iree_status_is_ok(status)) {
+    status = iree_allocator_malloc_array(state->host_allocator,
+                                         2 * out_plan->count,
+                                         sizeof(*out_plan->device),
+                                         (void**)&out_plan->device);
+  }
+  if (!iree_status_is_ok(status)) {
+    iree_allocator_free(state->host_allocator, merged);
+    out_plan->count = 0;
+    return status;
+  }
+  out_plan->image = out_plan->device + out_plan->count;
+  uint64_t fixed = 0;
+  for (iree_host_size_t i = 0; i < fixed_count; ++i) {
+    out_plan->device[i] = merged[i];
+    out_plan->image[i] = (loom_runtime_snapshot_range_t){0, fixed,
+                                                         merged[i].length};
+    fixed += merged[i].length;
+  }
+  // Logical order: per region and plane, blocks in order.
+  iree_host_size_t i = fixed_count, source = fixed_count;
+  uint64_t consumed = 0, unit_offset = 0;
+  for (iree_host_size_t r = 0;
+       r < storage->region_count && iree_status_is_ok(status); ++r) {
     const loom_runtime_block_region_t* region = &storage->regions[r].blocks;
-    for (iree_host_size_t plane = 0; plane < region->count; ++plane) {
+    for (iree_host_size_t plane = 0;
+         plane < region->count && iree_status_is_ok(status); ++plane) {
       for (uint32_t block = 0; block < block_count; ++block, ++i) {
+        if (source >= merged_count ||
+            merged[source].length - consumed < region->block_bytes) {
+          status = iree_make_status(IREE_STATUS_INTERNAL,
+                                    "snapshot ranges do not cover whole pages");
+          break;
+        }
+        out_plan->device[i] = (loom_runtime_snapshot_range_t){
+            merged[source].buffer_index, merged[source].offset + consumed,
+            region->block_bytes};
         out_plan->image[i] = (loom_runtime_snapshot_range_t){
             0, fixed + block * page + unit_offset, region->block_bytes};
+        consumed += region->block_bytes;
+        if (consumed == merged[source].length) {
+          ++source;
+          consumed = 0;
+        }
       }
       unit_offset += region->block_bytes;
     }
   }
-  return iree_ok_status();
+  if (iree_status_is_ok(status) && source != merged_count) {
+    status = iree_make_status(IREE_STATUS_INTERNAL,
+                              "snapshot ranges exceed the checkpoint's pages");
+  }
+  iree_allocator_free(state->host_allocator, merged);
+  if (!iree_status_is_ok(status)) {
+    iree_allocator_free(state->host_allocator, out_plan->device);
+    memset(out_plan, 0, sizeof(*out_plan));
+  }
+  return status;
 }
 
 static void loom_text_embed_image_plan_free(loom_serve_text_state_t* state,
                                             loom_text_embed_image_plan_t* plan) {
   iree_allocator_free(state->host_allocator, plan->device);
-  iree_allocator_free(state->host_allocator, plan->image);
 }
 
 // Moves every range between device state and the image, 64 at a time, then
@@ -1654,8 +1698,24 @@ LOOM_TEXT_EMBED_EXPORT int loom_text_embed_checkpoint_import(
   }
   const uint32_t needed = (uint32_t)iree_host_size_ceil_div(
       info->position, state->storage.block_size);
+  // Page IDs grow with demand (Loom 0.2.0): after a restart the pool is still
+  // empty. Grow it as Loom does when it resumes a suspended row.
+  loom_runtime_block_pool_t* pages = &state->cache.pool;
+  if (needed > pages->available) {
+    const uint32_t maximum =
+        (uint32_t)(state->cache.capacity / state->storage.block_size);
+    const uint32_t live = pages->capacity - pages->available;
+    if (needed <= maximum - live) {
+      uint64_t capacity = pages->capacity ? 2ull * pages->capacity : 16;
+      capacity = iree_max(capacity, (uint64_t)live + needed);
+      capacity = iree_min(capacity, (uint64_t)maximum);
+      iree_status_t status =
+          loom_runtime_block_pool_grow(pages, (uint32_t)capacity);
+      if (!iree_status_is_ok(status)) EMBED_RETURN(embed, status);
+    }
+  }
   if (!state->checkpoints.pool.available || !state->recurrent.pool.available ||
-      needed > state->cache.pool.available) {
+      needed > pages->available) {
     return 1;
   }
   // As Loom resumes a suspended endpoint: fresh IDs, committed backing, then
