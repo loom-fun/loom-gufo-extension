@@ -40,7 +40,7 @@ gufo serve llm --model <loom package dir>
 
 ## Changes
 
-**Gufo:** one small contract addition, API 0.3.15. A model path that is a
+**Gufo:** one small contract addition, merged in gufo-org/gufo#1303 (extension API 0.3.35). A model path that is a
 directory goes to the provider whose existing `probe` claims it
 (`ext::ProbeModelDirectory`), which creates its ordinary step runner
 (`create`) with no GGUF reader. `serve` takes that path in
@@ -72,11 +72,45 @@ existing text model layer:
 It exports only `loom_text_embed_*`.
 
 **Extension:** `loom-gufo-extension`, a community extension. Its manifest
-claims `manifest:loom`, declares `--loom-device`, `--loom-memory-bytes` and
-`--loom-preset`, and links `loom-text-embed` via pkg-config. The runner
+claims `manifest:loom`, declares `--loom-device`, `--loom-memory-bytes`,
+`--loom-preset`, `--loom-logits` and `--loom-checkpoint`/`--loom-drafter`/
+`--loom-vision`, and links `loom-text-embed` via pkg-config. The runner
 (about 1,600 lines) implements Gufo's `TextModelRunner` and `cache::Adapter`:
 Gufo's scheduler, prefix cache, parsers and every API endpoint drive the
 package's kernels unchanged.
+
+**Models (`gufo model`).** The manifest declares the loom-fun packages as
+Gufo models (`tools/models.py` from `tools/models.txt`; Gufo's
+`tools/models/lock.py` pins `models.lock.json`). Each has a `package`
+component, the loom-fun repository at a pinned revision, which fills
+`--model` with the model directory, and one component per origin its card's
+parameter files come from (`checkpoint`, and `drafter` or `vision` where the
+package uses one), with those files at their repository paths. `gufo model
+install` puts every component in the one model directory, so a package is
+served as published rather than as loom-fetch materializes it, which
+`src/loom_package.hpp` bridges at load:
+
+- **Preset.** A card with several presets and no `--loom-preset` serves the
+  one loom-fun publishes for the GPU Loom opens by default, the first GPU KFD
+  reports (`/sys/class/kfd/kfd/topology`): `chat` on gfx1151 (and without
+  KFD), `chat-gfx1150` (else `chat`) on gfx1150, `chat-r9700` on a gfx1201 with
+  24 GB or more, else `chat-16gb`. Any other GPU, a package without a preset
+  for the GPU, and a `--loom-device` that names a device are errors that list
+  the presets and ask for `--loom-preset`.
+- **Parameter files.** A file missing at its card path (`parameter/X.gguf`) is
+  looked up by its origin (`@checkpoint/X.gguf`): `--loom-<origin>` (a file,
+  or a directory with the origin's files at their repository paths), else the
+  model directory. If any were found that way, Loom opens a private
+  directory `$TMPDIR/gufo_loom_<pid>_*` of symbolic links (the package's
+  entries plus each found file at its card path, in real directories), the
+  same shape loom-fetch writes, removed when the model closes; one left by a
+  process that no longer exists is removed at the next load. Loom resolves
+  card paths only inside the package directory, so the card itself is
+  unchanged; card and origin paths must be normalized and relative. Missing
+  files are an error that names each one with its origin and says how to
+  install it.
+
+`tests/package_test.cpp` covers both, without a GPU.
 
 ## Logits
 

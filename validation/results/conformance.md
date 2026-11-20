@@ -1,17 +1,9 @@
 # Gufo conformance of loom-fun packages (35B parameters or less)
 
-## Module install on Gufo main (2026-11-20)
+## Loom 0.2.0 on Gufo main, every declared model (2026-11-20)
 
-Strix Halo (gfx1151), Gufo main ec6d3d07 (`nix build github:gufo-org/gufo/<rev>#sdk`, extension API 0.3.35), the
-extension installed as a module with `gufo extension install` (library from `nix/runtime.nix`, hrx-system v0.2.0),
-loom-fun packages fetched with `loom-fetch huggingface:loom-fun/<repo>:chat` (hrx-loom 0.2.0). Default options,
-`--sessions 4`, a stock 8 MiB locked-memory limit.
-
-| Package | conformance.py --logits (29 checks) |
-|---|---|
-| unsloth-Qwen3-0.6B-loom | 29 pass |
-| bartowski-Qwen2.5-0.5B-Instruct-loom | 29 pass |
-| ggml-org-gemma-3-1b-it-loom | 21 pass, 7 fail: the tool checks, with the tool round trip skipped (the package declares no tool-call format; see below) |
+See `models.md`: the 48 models of `extension.json`, installed with `gufo model install` and served by ID (or, for 23
+of them, on AMD DevLab runners from the loom-fetch package), `conformance.py --logits`.
 
 ## Loom 0.2.0 (2026-11-17)
 
