@@ -312,7 +312,7 @@ void TestToolChoiceRequired() {
   Fixture f;
   json::Value params = json::parse(
       R"({"type":"object","properties":{"city":{"type":"string"}},"required":["city"],"additionalProperties":false})");
-  const auto syntax = f.runner->ToolGrammarSyntax();
+  const auto syntax = f.runner->ToolGrammarSyntax(ext::ChatRequest{});
   CHECK(syntax.has_value(), "the package has a native call grammar");
   std::vector<sampling::JsonConstraint::Tool> tools;
   tools.emplace_back("get_weather",
@@ -337,7 +337,7 @@ void TestLazyGrammarStaysOnDevice() {
   Fixture f;
   json::Value params = json::parse(
       R"({"type":"object","properties":{"city":{"type":"string"}},"required":["city"],"additionalProperties":false})");
-  const auto syntax = f.runner->ToolGrammarSyntax();
+  const auto syntax = f.runner->ToolGrammarSyntax(ext::ChatRequest{});
   CHECK(syntax.has_value(), "the package has a native call grammar");
   std::vector<sampling::JsonConstraint::Tool> tools;
   tools.emplace_back("get_weather",
@@ -381,7 +381,7 @@ void TestDialectGating() {
   CHECK(!f.runner->NativeToolGrammar());
   json::Value params = json::parse(
       R"({"type":"object","properties":{"city":{"type":"string"}},"required":["city"],"additionalProperties":false})");
-  CHECK(!f.runner->ToolGrammarSyntax().has_value(), "no native grammar for an unknown syntax");
+  CHECK(!f.runner->ToolGrammarSyntax(ext::ChatRequest{}).has_value(), "no native grammar for an unknown syntax");
   std::vector<sampling::JsonConstraint::Tool> tools;
   tools.emplace_back("get_weather",
                      sampling::JsonConstraint::ToolParameters(
@@ -557,7 +557,7 @@ void TestDialects() {
     fake::reset();
     fake::state().script = PeakScript;
     Fixture f(true, 2, c.chat);
-    const auto syntax = f.runner->ToolGrammarSyntax();
+    const auto syntax = f.runner->ToolGrammarSyntax(ext::ChatRequest{});
     CHECK(syntax.has_value(), std::string(c.format) + ": a native grammar exists");
     if (!syntax) continue;
     const auto grammar = RequiredCall(*syntax);
@@ -628,7 +628,7 @@ void TestDialects() {
     fake::reset();
     fake::state().script = PeakScript;
     Fixture f(true, 2, std::string(R"({"call_format":")") + format + R"(","think_open":"<think>","think_end":"</think>","thinking":"toggle"})");
-    CHECK(!f.runner->ToolGrammarSyntax().has_value(), std::string(format) + ": no tool grammar");
+    CHECK(!f.runner->ToolGrammarSyntax(ext::ChatRequest{}).has_value(), std::string(format) + ": no tool grammar");
     json::Value params = json::parse(R"({"type":"object"})");
     sampling::SamplingConfig config;
     config.constraint = f.runner->BindConstraint(sampling::JsonConstraint::Object());

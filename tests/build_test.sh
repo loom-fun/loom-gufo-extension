@@ -1,7 +1,7 @@
 #!/bin/bash
 # Builds and runs the Loom runner's host-sampling tests against a fake
-# libloom_text_embed. No GPU, no Loom runtime. Needs a Gufo checkout (the
-# loom-extension branch) and g++ 13+.
+# libloom_text_embed. No GPU, no Loom runtime. Needs a Gufo checkout (main at
+# ec6d3d07 or later), g++ 13+ and Cargo.
 #   GUFO=/path/to/gufo ./build_test.sh [OUT_DIR]
 set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
@@ -21,22 +21,25 @@ cat > "$OUT/gufo/ext/detail/api_version.hpp" <<'EOF'
 #pragma once
 #include <string_view>
 namespace gufo::ext {
-inline constexpr unsigned kApiMajor = 0, kApiMinor = 3, kApiRevision = 16;
-inline constexpr std::string_view kApiVersion = "0.3.16";
+inline constexpr unsigned kApiMajor = 0, kApiMinor = 3, kApiRevision = 35;
+inline constexpr std::string_view kApiVersion = "0.3.35";
 }  // namespace gufo::ext
 EOF
 CXX=${CXX:-g++}
-FLAGS="-std=c++20 -O1 -g -I$OUT -I$GUFO -I$GUFO/include -I$here/../loom-embed"
+FLAGS="-std=c++20 -O1 -g -I$OUT -I$GUFO -I$GUFO/include -I$GUFO/src/core/json/include -I$here/../loom-embed"
 objs=()
 for f in src/core/sampling.cpp src/core/sampling_logit_row.cpp src/core/json_constraint.cpp \
-         src/core/json_schema_lexeme.cpp src/core/json_schema_regex.cpp src/ext/text.cpp src/core/crypto/sha256.cpp; do
+         src/core/json_schema_lexeme.cpp src/core/json_schema_regex.cpp src/ext/text.cpp src/core/crypto/sha256.cpp \
+         src/core/json.cpp; do
   o="$OUT/$(basename "$f" .cpp).o"; objs+=("$o")
   [ "$o" -nt "$GUFO/$f" ] || $CXX $FLAGS -c "$GUFO/$f" -o "$o" &
 done
+# Gufo parses JSON in Rust (src/core/json, linked through the gufo-rust static library).
+cargo build --quiet --release -p gufo-rust --manifest-path "$GUFO/Cargo.toml" --target-dir "$OUT/cargo" &
 wait
 $CXX $FLAGS -c "$here/../src/loom_chat.cpp" -o "$OUT/loom_chat.o" &
 $CXX $FLAGS -c "$here/fake_embed.cpp" -o "$OUT/fake_embed.o" &
 $CXX $FLAGS -c "$here/runner_logits_test.cpp" -o "$OUT/runner_logits_test.o" &
 wait
-$CXX "${objs[@]}" "$OUT/fake_embed.o" "$OUT/loom_chat.o" "$OUT/runner_logits_test.o" -o "$OUT/runner_logits_test" -lpthread -lcrypto -Wl,--unresolved-symbols=ignore-all $(pkg-config --libs icu-uc icu-i18n 2>/dev/null || echo "-licuuc -licui18n")
+$CXX "${objs[@]}" "$OUT/fake_embed.o" "$OUT/loom_chat.o" "$OUT/runner_logits_test.o" -o "$OUT/runner_logits_test" "$OUT/cargo/release/libgufo_rust.a" -lpthread -ldl -lcrypto -Wl,--unresolved-symbols=ignore-all $(pkg-config --libs icu-uc icu-i18n 2>/dev/null || echo "-licuuc -licui18n")
 "$OUT/runner_logits_test"
