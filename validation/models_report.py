@@ -7,7 +7,11 @@ Each run is the user flow on one machine: `gufo model install ID`,
 and bench.py (BENCH/ID.json); optionally loom-serve with bench.py on the same
 package (LOOMSERVE/ID.json) for the Gufo / loom-serve ratio.
 
-    validation/models_report.py CONF BENCH [LOOMSERVE] --machine TEXT
+    validation/models_report.py CONF BENCH [LOOMSERVE] --machine TEXT [--devlab DIR --devlab-note TEXT]
+
+--devlab DIR: conformance results (ID.json) of models run on AMD DevLab
+Dispatch instead (Gufo bundle, the package fetched with loom-fetch), for
+models without a local run.
 """
 
 import json
@@ -27,6 +31,18 @@ KNOWN = {
     "Anthropic Messages (text + tool_use)": "the package declares no tool-call format",
 }
 
+# Single failures, explained (model id, check).
+EXPLAINED = {
+    ("llama-3.2-3b-instruct-loom", "tool round trip"):
+        "calls the tool again instead of answering (model behavior; loom-serve does the same)",
+    ("qwen3.5-2b-loom", "reasoning effort"):
+        "low and high effort both reason to the length limit (the small model's reasoning loops)",
+    ("ornith-1.0-35b-loom", "tool_choice named"):
+        "reasoning loops when the named tool conflicts with the question (as on Loom 0.1.0, results/logits.md)",
+    ("laguna-xs-2.1-loom", "shared prefix across sessions"):
+        "a prefix shared by two different conversations is not reused; each conversation's own history is",
+}
+
 
 def load(path):
     try:
@@ -36,9 +52,11 @@ def load(path):
 
 
 def main():
-    args = [a for a in sys.argv[1:] if not a.startswith("--")]
-    machine = sys.argv[sys.argv.index("--machine") + 1] if "--machine" in sys.argv else ""
-    args = [a for a in args if a != machine]
+    def option(name):
+        return sys.argv[sys.argv.index(name) + 1] if name in sys.argv else ""
+    machine, devlab, devlab_note = option("--machine"), option("--devlab"), option("--devlab-note")
+    values = {machine, devlab, devlab_note}
+    args = [a for a in sys.argv[1:] if not a.startswith("--") and a not in values]
     conf_dir, bench_dir = Path(args[0]), Path(args[1])
     ls_dir = Path(args[2]) if len(args) > 2 else None
     manifest = json.loads((ROOT / "extension.json").read_text())
@@ -46,28 +64,34 @@ def main():
     lines += [
         "# Declared models through Gufo",
         "",
-        f"Each model as a user runs it: `gufo model install ID`, then `gufo serve llm --model ID --sessions 4`. {machine}",
+        f"Local: each model as a user runs it, `gufo model install ID`, then `gufo serve llm --model ID --sessions 4`. {machine}",
+        "",
+        f"DevLab: {devlab_note}" if devlab else "",
         "",
         "Gufo checks: `conformance.py --logits` (29 checks). Throughput: `bench.py --reps 2` (greedy, thinking off;",
         "decode = one stream after a short prompt, prefill = time to first token of a ~10k-token document, 4 streams =",
         "aggregate decode). Gufo / loom-serve: the same package, preset and flags under loom-serve 0.2.0 on the same machine.",
         "",
-        "| Model ID | Gufo checks | Decode tok/s | Prefill tok/s | 4 streams tok/s | Gufo / loom-serve decode, prefill, 4 streams | Notes |",
-        "|---|---|---|---|---|---|---|",
+        "| Model ID | Run | Gufo checks | Decode tok/s | Prefill tok/s | 4 streams tok/s | Gufo / loom-serve decode, prefill, 4 streams | Notes |",
+        "|---|---|---|---|---|---|---|---|",
     ]
     for model in manifest["models"]:
         mid = model["id"]
         conf, bench = load(conf_dir / f"{mid}.json"), load(bench_dir / f"{mid}.json")
+        where = "local"
+        if conf is None and devlab:
+            conf, where = load(Path(devlab) / f"{mid}.json"), "DevLab"
         ls = load(ls_dir / f"{mid}.json") if ls_dir else None
         if conf is None:
-            lines.append(f"| `{mid}` | not run | | | | | |")
+            lines.append(f"| `{mid}` | | not run | | | | | |")
             continue
         results = conf["results"]
         passed = sum(r["status"] == "pass" for r in results)
         failed = [r for r in results if r["status"] == "fail"]
         notes = []
         for r in failed:
-            notes.append(f"{r['check']}: {KNOWN.get(r['check'], str(r.get('detail') or '')[:120])}")
+            why = EXPLAINED.get((mid, r["check"])) or KNOWN.get(r["check"]) or str(r.get("detail") or "")[:120]
+            notes.append(f"{r['check']}: {why}")
         checks = f"{passed}/{len(results)}"
         summary[mid] = {"conformance": checks, "failed": [r["check"] for r in failed]}
         nums = ["", "", ""]
@@ -79,9 +103,9 @@ def main():
                 parts = [bench[k]["tok_s"] / ls[k]["tok_s"] for k in ("decode", "prefill", "c4")]
                 ratio = ", ".join(f"{p * 100:.0f} %" for p in parts)
                 summary[mid]["vs_loom_serve"] = dict(zip(("decode", "prefill", "c4"), parts))
-        tool_free = failed and all(KNOWN.get(r["check"]) for r in failed)
+        tool_free = failed and all(KNOWN.get(r["check"]) and (mid, r["check"]) not in EXPLAINED for r in failed)
         note = "no tool calls (model)" if tool_free else "; ".join(notes)
-        lines.append(f"| `{mid}` | {checks} | {nums[0]} | {nums[1]} | {nums[2]} | {ratio} | {note} |")
+        lines.append(f"| `{mid}` | {where} | {checks} | {nums[0]} | {nums[1]} | {nums[2]} | {ratio} | {note} |")
     (HERE / "results" / "models.md").write_text("\n".join(lines) + "\n")
     (HERE / "results" / "models.json").write_text(json.dumps(summary, indent=1) + "\n")
 

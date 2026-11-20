@@ -110,6 +110,56 @@ throughput per model is in `validation/results/models.md`. Gufo checks: Gufo's 2
 conformance checks with `--logits`, on the installed model (`validation/results/models.md` explains each failure).
 
 <!-- models table: tools/models_table.py -->
+| Gufo model ID | Model | Download | Features | Decode tok/s, Loom vs llama.cpp | Prefill tok/s, 32k prompt | Gufo checks |
+|---|---|---|---|---|---|---|
+| `qwen3-0.6b-loom` | [Qwen/Qwen3-0.6B](https://huggingface.co/loom-fun/unsloth-Qwen3-0.6B-loom) | 406 MB | tools, reasoning | 308 vs 266 (+16 %) | 3,981 vs 2,717 (+47 %) | 29/29 |
+| `qwen2.5-0.5b-instruct-loom` | [Qwen/Qwen2.5-0.5B-Instruct](https://huggingface.co/loom-fun/bartowski-Qwen2.5-0.5B-Instruct-loom) | 406 MB | tools | 320 vs 293 (+9 %) | 7,949 vs 6,501 (+22 %) | 29/29 |
+| `qwen3.5-0.8b-loom` | [Qwen/Qwen3.5-0.8B](https://huggingface.co/loom-fun/unsloth-Qwen3.5-0.8B-loom) | 751 MB | tools, reasoning, vision | 265 vs 202 (+31 %) | 8,870 vs 5,639 (+57 %) | 29/29 |
+| `gemma-3-1b-it-loom` | [google/gemma-3-1b-it](https://huggingface.co/loom-fun/ggml-org-gemma-3-1b-it-loom) | 825 MB |  | 194 vs 168 (+16 %) | — | 21/28 |
+| `qwen2.5-1.5b-instruct-loom` | [Qwen/Qwen2.5-1.5B-Instruct](https://huggingface.co/loom-fun/bartowski-Qwen2.5-1.5B-Instruct-loom) | 995 MB | tools | 166 vs 156 (+6 %) | 3,413 vs 2,576 (+32 %) | 29/29 |
+| `lfm3-omni-2b-loom` | [LiquidAI/LFM3-Omni-2B](https://huggingface.co/loom-fun/ggml-org-LFM3-Omni-2B-loom) | 1.1 GB | tools, reasoning | 170 vs 148 (+15 %) | 5,744 vs 4,330 (+33 %) | 29/29 |
+| `lfm3-1.7b-loom` | [LiquidAI/LFM3-1.7B](https://huggingface.co/loom-fun/bartowski-LFM3-1.7B-loom) | 1.1 GB | tools, reasoning | 162 vs 137 (+18 %) | 5,635 vs 4,128 (+36 %) | 29/29 |
+| `hyperclovax-seed-text-instruct-1.5b-loom` | [naver-hyperclovax/HyperCLOVAX-SEED-Text-Instruct-1.5B](https://huggingface.co/loom-fun/rippertnt-HyperCLOVAX-SEED-Text-Instruct-1.5B-loom) | 1.1 GB |  | 169 vs 156 (+8 %) | 3,468 vs 2,308 (+50 %) | 21/28 |
+| `qwen3-1.7b-loom` | [Qwen/Qwen3-1.7B](https://huggingface.co/loom-fun/ggml-org-Qwen3-1.7B-loom) | 1.3 GB | tools, reasoning | 148 vs 144 (+2 %) | 3,113 vs 2,030 (+53 %) | 29/29 |
+| `qwen3.5-2b-loom` | [Qwen/Qwen3.5-2B](https://huggingface.co/loom-fun/unsloth-Qwen3.5-2B-loom) | 2.0 GB | tools, reasoning, vision | 134 vs 118 (+14 %) | 5,359 vs 3,489 (+54 %) | 28/29 |
+| `llama-3.2-3b-instruct-loom` | [meta-llama/Llama-3.2-3B-Instruct](https://huggingface.co/loom-fun/unsloth-Llama-3.2-3B-Instruct-loom) | 2.0 GB | tools | 97 vs 90 (+8 %) | 1,810 vs 1,075 (+68 %) | 28/29 |
+| `qwen3-4b-instruct-2507-loom` | [Qwen/Qwen3-4B-Instruct-2507](https://huggingface.co/loom-fun/unsloth-Qwen3-4B-Instruct-2507-loom) | 2.5 GB | tools, drafting | 78 vs 74 (+6 %) | 1,269 vs 867 (+46 %) | 29/29 |
+| `spark-x2.5-4b-loom` | [XHToken/Spark-X2.5-4B](https://huggingface.co/loom-fun/XHToken-Spark-X2.5-4B-loom) | 2.6 GB | tools, reasoning | 72 vs 61 (+18 %) | 2,174 vs 1,274 (+71 %) | 29/29 |
+| `spark-x2.6-4b-loom` | [XHToken/Spark-X2.6-4B](https://huggingface.co/loom-fun/bartowski-Spark-X2.6-4B-loom) | 2.6 GB | tools, reasoning | 70 vs 62 (+13 %) | 2,130 vs 1,340 (+59 %) | 29/29 |
+| `qwen3-4b-loom` | [Qwen/Qwen3-4B](https://huggingface.co/loom-fun/ggml-org-Qwen3-4B-loom) | 3.1 GB | tools, reasoning, drafting | 100 vs 74 (+36 %) | 1,263 vs 868 (+45 %) | 29/29 |
+| `qwen3-vl-4b-instruct-loom` | [Qwen/Qwen3-VL-4B-Instruct](https://huggingface.co/loom-fun/unsloth-Qwen3-VL-4B-Instruct-loom) | 3.3 GB | tools, vision | 78 vs 71 (+9 %) | 1,265 vs 838 (+51 %) | 29/29 |
+| `qwen3.5-4b-loom` | [Qwen/Qwen3.5-4B](https://huggingface.co/loom-fun/unsloth-Qwen3.5-4B-loom) | 4.1 GB | tools, reasoning, vision, drafting | 88 vs 56 (+57 %) | 2,322 vs 1,353 (+72 %) | 29/29 |
+| `gemma-4-e2b-it-loom` | [google/gemma-4-E2B-it](https://huggingface.co/loom-fun/unsloth-gemma-4-E2B-it-loom) | 4.2 GB | tools, reasoning, vision, drafting | 148 vs 109 (+36 %) | 2,811 vs 4,432 (-37 %) | 29/29 |
+| `qwen2.5-7b-instruct-loom` | [Qwen/Qwen2.5-7B-Instruct](https://huggingface.co/loom-fun/bartowski-Qwen2.5-7B-Instruct-loom) | 4.7 GB | tools | 47 vs 46 (+1 %) | 1,205 vs 826 (+46 %) | 29/29 |
+| `qwen2.5-vl-7b-instruct-loom` | [Qwen/Qwen2.5-VL-7B-Instruct](https://huggingface.co/loom-fun/ggml-org-Qwen2.5-VL-7B-Instruct-loom) | 6.0 GB | vision | 47 vs 46 (+1 %) | 1,225 vs 807 (+52 %) | 21/28 |
+| `gemma-4-e4b-it-loom` | [google/gemma-4-E4B-it](https://huggingface.co/loom-fun/unsloth-gemma-4-E4B-it-loom) | 6.1 GB | tools, reasoning, vision, drafting | 92 vs 75 (+22 %) | 2,003 vs 1,912 (+5 %) | 29/29 |
+| `qwen3-8b-loom` | [Qwen/Qwen3-8B](https://huggingface.co/loom-fun/unsloth-Qwen3-8B-loom) | 6.2 GB | tools, reasoning, drafting | 66 vs 52 (+27 %) | 959 vs 656 (+46 %) | 29/29 |
+| `qwen3-vl-8b-instruct-loom` | [Qwen/Qwen3-VL-8B-Instruct](https://huggingface.co/loom-fun/unsloth-Qwen3-VL-8B-Instruct-loom) | 6.2 GB | tools, vision | 45 vs 42 (+7 %) | 958 vs 658 (+46 %) | 29/29 |
+| `ornith-1.0-9b-loom` | [deepreinforce-ai/Ornith-1.0-9B](https://huggingface.co/loom-fun/unsloth-Ornith-1.0-9B-loom) | 6.6 GB | tools, reasoning, vision | 41 vs 37 (+10 %) | 1,520 vs 916 (+66 %) | 29/29 |
+| `gemma-4-12b-it-loom` | [google/gemma-4-12B-it](https://huggingface.co/loom-fun/unsloth-gemma-4-12B-it-loom) | 7.6 GB | tools, reasoning, drafting | 52 vs 30 (+75 %) | 828 vs 525 (+58 %) | 29/29 |
+| `ornith-1.5-9b-loom` | [ornith-ai/Ornith-1.5-9B](https://huggingface.co/loom-fun/bartowski-Ornith-1.5-9B-loom) | 7.6 GB | tools, reasoning, vision, drafting | 62 vs 39 (+59 %) | 1,467 vs 850 (+73 %) | 29/29 |
+| `nemotron-3.5-bolt-e4b-loom` | [nemotron-3.5-bolt-e4b](https://huggingface.co/loom-fun/nvidia-NVIDIA-Nemotron-3.5-Bolt-E4B-4GB-loom) | 7.9 GB | tools, reasoning, vision, drafting | 98 vs 55 (+78 %) | 2,387 vs 1,219 (+96 %) | 29/29 |
+| `qwen3.5-9b-loom` | [Qwen/Qwen3.5-9B](https://huggingface.co/loom-fun/unsloth-Qwen3.5-9B-loom) | 8.0 GB | tools, reasoning, vision, drafting | 62 vs 36 (+68 %) | 1,484 vs 884 (+68 %) | 29/29 |
+| `mellum2.1-12b-a2.5b-thinking-loom` | [JetBrains/Mellum2.1-12B-A2.5B-Thinking](https://huggingface.co/loom-fun/bartowski-Mellum2.1-12B-A2.5B-Thinking-loom) | 8.8 GB | tools, reasoning | 102 vs 76 (+34 %) | 2,928 vs 1,752 (+67 %) | 29/29 |
+| `qwen3-14b-loom` | [Qwen/Qwen3-14B](https://huggingface.co/loom-fun/ggml-org-Qwen3-14B-loom) | 9.0 GB | tools, reasoning | 25 vs 24 (+3 %) | 607 vs 331 (+83 %) | 29/29 |
+| `gpt-oss-20b-loom` | [openai/gpt-oss-20b](https://huggingface.co/loom-fun/unsloth-gpt-oss-20b-loom) | 11.6 GB | tools, reasoning | 83 vs 78 (+6 %) | 1,934 vs 1,302 (+49 %) | 29/29 |
+| `lfm2.5-24b-a2b-loom` | [LiquidAI/LFM2.5-24B-A2B](https://huggingface.co/loom-fun/ggml-org-LFM2.5-24B-A2B-loom) | 14.5 GB | tools, reasoning | 107 vs 99 (+8 %) | 2,918 vs 1,911 (+53 %) | 29/29 |
+| `gemma-4-26b-a4b-it-loom` | [google/gemma-4-26B-A4B-it](https://huggingface.co/loom-fun/lmstudio-community-gemma-4-26B-A4B-it-loom) | 17.1 GB | tools, reasoning, drafting | 68 vs 34 (+98 %) | 1,569 vs 917 (+71 %) | 29/29 |
+| `qwen3-coder-30b-a3b-instruct-loom` | [Qwen/Qwen3-Coder-30B-A3B-Instruct](https://huggingface.co/loom-fun/ggml-org-Qwen3-Coder-30B-A3B-Instruct-loom) | 18.3 GB | tools, drafting | 68 vs 29 (+135 %) | 961 vs 648 (+48 %) | 29/29 |
+| `qwen3.8-27b-loom` | [qwen3.8-27b](https://huggingface.co/loom-fun/bartowski-Qwen3.8-27B-loom) | 18.4 GB | tools, reasoning, vision, drafting | 28 vs 23 (+25 %) | 572 vs 309 (+85 %) | 29/29 |
+| `qwen3-30b-a3b-instruct-2507-loom` | [Qwen/Qwen3-30B-A3B-Instruct-2507](https://huggingface.co/loom-fun/unsloth-Qwen3-30B-A3B-Instruct-2507-loom) | 18.6 GB | tools, drafting | 86 vs 76 (+12 %) | 931 vs 635 (+47 %) | 29/29 |
+| `gemma-4-31b-it-loom` | [google/gemma-4-31B-it](https://huggingface.co/loom-fun/unsloth-gemma-4-31B-it-loom) | 19.3 GB | tools, reasoning, drafting | 24 vs 16 (+50 %) | 315 vs 195 (+61 %) | 29/29 |
+| `qwen2.5-32b-instruct-loom` | [Qwen/Qwen2.5-32B-Instruct](https://huggingface.co/loom-fun/bartowski-Qwen2.5-32B-Instruct-loom) | 19.9 GB | tools | 12 vs 11 (+3 %) | 308 vs 175 (+75 %) | 29/29 |
+| `laguna-xs-2.1-loom` | [poolside/Laguna-XS-2.1](https://huggingface.co/loom-fun/ggml-org-Laguna-XS-2.1-loom) | 20.1 GB | tools, reasoning, drafting | 43 (no llama.cpp run) | 1,475 (no llama.cpp run) | 28/29 |
+| `nanbeige4.3-33b-loom` | [Nanbeige/Nanbeige4.3-33B](https://huggingface.co/loom-fun/bartowski-Nanbeige4.3-33B-loom) | 20.8 GB | tools, reasoning | 11 vs 11 (+6 %) | 271 vs 186 (+46 %) | 29/29 |
+| `qwen3.6-27b-loom` | [Qwen/Qwen3.6-27B](https://huggingface.co/loom-fun/ggml-org-Qwen3.6-27B-loom) | 21.1 GB | tools, reasoning, vision, drafting | 23 vs 16 (+45 %) | 465 vs 317 (+47 %) | 29/29 |
+| `qwen3.6-35b-a3b-loom` | [Qwen/Qwen3.6-35B-A3B](https://huggingface.co/loom-fun/ggml-org-Qwen3.6-35B-A3B-loom) | 21.9 GB | tools, reasoning, vision, drafting | 91 vs 57 (+59 %) | 2,078 vs 1,048 (+98 %) | 29/29 |
+| `ornith-1.0-35b-loom` | [ornith-ai/Ornith-1.0-35B](https://huggingface.co/loom-fun/lmstudio-community-Ornith-1.0-35B-loom) | 22.1 GB | tools, reasoning, vision | 75 vs 66 (+14 %) | 2,111 vs 1,058 (+100 %) | 28/29 |
+| `minicpm-v-4.7-35b-a3b-loom` | [openbmb/MiniCPM-V-4.7-35B-A3B](https://huggingface.co/loom-fun/bartowski-MiniCPM-V-4.7-35B-A3B-loom) | 22.3 GB | tools, reasoning | 62 vs 53 (+18 %) | 2,159 vs 1,069 (+102 %) | 29/29 |
+| `sage-a1.5-loom` | [InternScience/Sage-A1.5](https://huggingface.co/loom-fun/InternScience-Sage-A1.5-loom) | 22.6 GB | tools, reasoning, vision, drafting | 88 vs 71 (+23 %) | 2,103 vs 994 (+112 %) | 29/29 |
+| `qwen3.5-35b-a3b-loom` | [Qwen/Qwen3.5-35B-A3B](https://huggingface.co/loom-fun/unsloth-Qwen3.5-35B-A3B-loom) | 23.2 GB | tools, reasoning, vision, drafting | 82 vs 53 (+55 %) | 2,120 vs 1,072 (+98 %) | 29/29 |
+| `ornith-1.5-35b-a3b-loom` | [ornith-ai/Ornith-1.5-35B-A3B](https://huggingface.co/loom-fun/bartowski-Ornith-1.5-35B-A3B-loom) | 23.2 GB | tools, reasoning, vision, drafting | 73 vs 39 (+88 %) | 2,062 vs 986 (+109 %) | 29/29 |
+| `muse-glimmer-30b-loom` | [meta-models/Muse-Glimmer-30B](https://huggingface.co/loom-fun/ggml-org-Muse-Glimmer-30B-loom) | 24.8 GB | tools, reasoning, vision, drafting | 28 vs 21 (+34 %) | 486 vs 358 (+36 %) | 29/29 |
 <!-- end models table -->
 
 **Logits:** forced or named `tool_choice`, strict tool schemas, `response_format`, `logprobs`, `min_p` and penalties
@@ -139,14 +189,21 @@ elastic pool, which the extension then uses).
 
 ## Quality
 
-`validation/results/` holds the evidence: Gufo's 29 conformance checks per package (`conformance.md`), throughput
-against llama.cpp (`bench.md`) and the logits features (`logits.md`). Known gaps, all model behavior that loom-serve
-shows too:
+Every declared model passed Gufo's API conformance checks (`conformance.py --logits`, 29 checks) on Strix Halo,
+24 through `gufo model install` and `--model <ID>` on a local machine and 24 on AMD DevLab runners
+(`validation/results/models.md`, with Gufo's throughput per model). 41 pass all 29. The gaps:
 
 - gemma-3-1b, HyperCLOVAX-1.5B and Qwen2.5-VL-7B never call tools (their packages declare no tool-call format), so
   the 7 tool checks fail on them.
-- Llama-3.2-3B calls the tool again instead of answering; Qwen3.5-0.8B's reasoning can loop to the length limit.
+- Model behavior that loom-serve shows too: Llama-3.2-3B calls the tool again instead of answering; Qwen3.5-2B's
+  reasoning ran to the length limit at both low and high effort; Ornith-1.0-35B's reasoning loops when a named
+  `tool_choice` conflicts with the question.
+- Laguna-XS-2.1 does not reuse a prompt prefix shared by two different conversations (each conversation's own history
+  is reused).
 - Requests that need logits decode somewhat slower (host sampling, no drafting).
+
+Earlier evidence in `validation/results/`: images, the disk cache tier and the CLI across 48 packages on Loom 0.1.0
+(`conformance.md`), Gufo against loom-serve (`bench.md`) and the logits features (`logits.md`).
 
 ## Releases
 
