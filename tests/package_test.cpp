@@ -70,6 +70,25 @@ void TestPresets() {
     threw = std::string(error.what()).find("no preset for gfx1201") != std::string::npos;
   }
   CHECK(threw, "a package without a gfx1201 preset says so");
+  threw = false;
+  try {
+    Preset(card, 120000, 16);
+  } catch (const std::exception& error) {
+    threw = std::string(error.what()).find("no preset for gfx1200") != std::string::npos;
+  }
+  CHECK(threw, "gfx1200 gets no gfx1201 preset");
+  threw = false;
+  try {
+    package::ChoosePreset(card, "", {.named_device = true}, nullptr);
+  } catch (const std::exception& error) {
+    threw = std::string(error.what()).find("--loom-device names a device") != std::string::npos;
+  }
+  CHECK(threw, "a named --loom-device needs --loom-preset");
+  CHECK(package::ChoosePreset(card, "chat-r9700", {.named_device = true}, nullptr) == "chat-r9700",
+        "a named device with --loom-preset");
+  CHECK(!package::NamesDevice("amdgpu://?completion_spin_ns=1") && !package::NamesDevice(""),
+        "Loom's default device");
+  CHECK(package::NamesDevice("amdgpu://1") && package::NamesDevice("amdgpu://1?x=2"), "a named device");
   const auto single = json::parse(R"({"presets": {"chat": {"variant": "gguf"}}})");
   CHECK(Preset(single, 120001, 32).empty(), "one preset: Loom picks it");
   CHECK(package::GpuName(110501) == "gfx1151", "gfx1151 name");
@@ -158,6 +177,38 @@ void TestMissing() {
   fs::remove_all(root);
 }
 
+void TestStaleAndLayouts() {
+  // A private directory of a process that no longer exists is removed.
+  const auto stale = fs::path(std::getenv("TMPDIR")) / "gufo_loom_999999999_abcdef";
+  Write(stale / "model.json", "{}");
+  const auto root = TempDir();
+  Write(root / "model.json", kCard);
+  Write(root / "sub" / "model-Q4_K_M.gguf", "weights");
+  Write(root / "draft.gguf", "draft");
+  // The package's own parameter/ directory, reached through a symbolic link.
+  const auto shared = TempDir();
+  Write(shared / "extra.bin", "x");
+  fs::create_directory_symlink(shared, root / "parameter");
+  {
+    const auto resolved = package::Resolve(root.string(), "", {}, {110501, 128ull << 30});
+    CHECK(!fs::exists(stale), "a dead process's directory is removed");
+    CHECK(fs::exists(resolved.overlay / "parameter" / "extra.bin"), "a linked directory's files are kept");
+    CHECK(fs::exists(resolved.overlay / "parameter" / "model-Q4_K_M.gguf"), "and the found files added");
+    CHECK(!fs::is_symlink(resolved.overlay / "parameter"), "in a real directory");
+  }
+  fs::remove(root / "parameter");
+  Write(root / "parameter", "a file");
+  bool threw = false;
+  try {
+    package::Resolve(root.string(), "", {}, {110501, 128ull << 30});
+  } catch (const std::exception& error) {
+    threw = std::string(error.what()).find("expects a directory") != std::string::npos;
+  }
+  CHECK(threw, "a file where the card expects a directory is an error");
+  fs::remove_all(root);
+  fs::remove_all(shared);
+}
+
 void TestUnsafePaths() {
   CHECK(package::SafeRelative("parameter/a.gguf"), "plain path");
   CHECK(!package::SafeRelative("../a.gguf"), "parent");
@@ -193,6 +244,7 @@ int main() {
   TestOriginOptions();
   TestMissing();
   TestUnsafePaths();
+  TestStaleAndLayouts();
   fs::remove_all(tmp);
   if (failures) {
     std::cerr << failures << " failed\n";

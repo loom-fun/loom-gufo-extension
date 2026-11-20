@@ -688,7 +688,7 @@
     {
       "id": "qwen3-4b-loom",
       "provider": "loom-text",
-      "license": "apache-2.0, mit",
+      "license": "apache-2.0; drafter (AtomicChat/Qwen3-4B-DFlash-GGUF): mit",
       "description": "Qwen3-4B on AMD Loom (Q4_K_M GGUF, speculative decoding)",
       "components": [
         {
@@ -1019,7 +1019,7 @@
     {
       "id": "qwen3-8b-loom",
       "provider": "loom-text",
-      "license": "apache-2.0, mit",
+      "license": "apache-2.0; drafter (AtomicChat/Qwen3-8B-DFlash-GGUF): mit",
       "description": "Qwen3-8B on AMD Loom (Q4_K_M GGUF, speculative decoding)",
       "components": [
         {
@@ -1152,7 +1152,7 @@
     {
       "id": "gemma-4-12b-it-loom",
       "provider": "loom-text",
-      "license": "apache-2.0",
+      "license": "apache-2.0; drafter (Anbeeld/gemma4-12B-it-DFlash-GGUF): no license stated",
       "description": "gemma-4-12B-it on AMD Loom (Q4_K_M GGUF, speculative decoding)",
       "components": [
         {
@@ -1528,7 +1528,7 @@
     {
       "id": "gemma-4-26b-a4b-it-loom",
       "provider": "loom-text",
-      "license": "apache-2.0",
+      "license": "apache-2.0; drafter (Anbeeld/gemma-4-26B-A4B-it-DFlash-GGUF): no license stated",
       "description": "gemma-4-26B-A4B-it on AMD Loom (Q4_K_M GGUF, speculative decoding)",
       "components": [
         {
@@ -1579,7 +1579,7 @@
     {
       "id": "qwen3-coder-30b-a3b-instruct-loom",
       "provider": "loom-text",
-      "license": "apache-2.0",
+      "license": "apache-2.0; drafter (Anbeeld/Qwen3-Coder-30B-A3B-DFlash-GGUF): no license stated",
       "description": "Qwen3-Coder-30B-A3B-Instruct on AMD Loom (Q4_K_M GGUF, speculative decoding)",
       "components": [
         {
@@ -1710,7 +1710,7 @@
     {
       "id": "gemma-4-31b-it-loom",
       "provider": "loom-text",
-      "license": "apache-2.0",
+      "license": "apache-2.0; drafter (Anbeeld/gemma-4-31B-it-DFlash-GGUF): no license stated",
       "description": "gemma-4-31B-it on AMD Loom (Q4_K_M GGUF, speculative decoding)",
       "components": [
         {
@@ -1890,7 +1890,7 @@
     {
       "id": "qwen3.6-27b-loom",
       "provider": "loom-text",
-      "license": "apache-2.0",
+      "license": "apache-2.0; drafter (Anbeeld/Qwen3.6-27B-DFlash-GGUF): no license stated",
       "description": "Qwen3.6-27B on AMD Loom (Q4_K_M GGUF, speculative decoding, vision)",
       "components": [
         {
@@ -2117,7 +2117,7 @@
     {
       "id": "qwen3.5-35b-a3b-loom",
       "provider": "loom-text",
-      "license": "apache-2.0",
+      "license": "apache-2.0; drafter (Anbeeld/Qwen3.5-35B-A3B-DFlash-GGUF): no license stated",
       "description": "Qwen3.5-35B-A3B on AMD Loom (Q4_K_M GGUF, speculative decoding, vision)",
       "components": [
         {

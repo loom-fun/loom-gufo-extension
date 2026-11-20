@@ -11,6 +11,7 @@ directory to pin each file's size and SHA-256 in models.lock.json.
 
     python3 tools/models.py                     # needs network (Hugging Face)
     python3 /path/to/gufo/tools/models/lock.py .
+    python3 tools/models.py --licenses          # refresh only the license fields
 
 Set HF_TOKEN for higher rate limits; HF_ENDPOINT selects a mirror.
 """
@@ -58,6 +59,11 @@ def license_of(repo):
     if value == "other" and data.get("license_name"):
         value = data["license_name"]
     return value if isinstance(value, str) else None
+
+
+def license_text(licenses):
+    """The checkpoint's license first, then any other origin's that differs."""
+    return "; ".join(dict.fromkeys(licenses)) or "no license stated"
 
 
 def parameter_files(card):
@@ -127,18 +133,38 @@ def declare(repo):
             component["entry"] = "."
         components.append(component)
         value = license_of(source["repository"])
-        if value and value not in licenses:
-            licenses.append(value)
+        if origin == "checkpoint":
+            licenses.insert(0, value or "no license stated")
+        elif value != (licenses[0] if licenses else None):
+            licenses.append(f"{origin} ({source['repository']}): {value or 'no license stated'}")
     return {
         "id": model_id(card),
         "provider": "loom-text",
-        "license": ", ".join(licenses) or "see the model card",
+        "license": license_text(licenses),
         "description": describe(card, files),
         "components": components,
     }
 
 
+def relicense():
+    """Rewrites only the license fields (keeps every pinned revision)."""
+    path = ROOT / "extension.json"
+    manifest = json.loads(path.read_text())
+    for model in manifest["models"]:
+        licenses = []
+        for component in model["components"][1:]:
+            value = license_of(component["source"]["hf"])
+            if component["role"] == "checkpoint":
+                licenses.insert(0, value or "no license stated")
+            elif value != (licenses[0] if licenses else None):
+                licenses.append(f"{component['role']} ({component['source']['hf']}): {value or 'no license stated'}")
+        model["license"] = license_text(licenses)
+    path.write_text(json.dumps(manifest, indent=2) + "\n")
+
+
 def main():
+    if "--licenses" in sys.argv:
+        return relicense()
     repos = [line.strip() for line in (ROOT / "tools" / "models.txt").read_text().splitlines()
              if line.strip() and not line.startswith("#")]
     models = []

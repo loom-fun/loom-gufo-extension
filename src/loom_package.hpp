@@ -7,12 +7,14 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <cerrno>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
 #include <map>
+#include <set>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -21,6 +23,10 @@
 #include <vector>
 
 #include <gufo/ext/json.hpp>
+
+#include <signal.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 namespace gufo::loom {
 
@@ -40,7 +46,19 @@ inline std::string ReadText(const fs::path& path) {
 struct Gpu {
   unsigned target = 0;
   std::uint64_t memory_bytes = 0;
+  // --loom-device names a device: which KFD node it is is not known here.
+  bool named_device = false;
 };
+
+// A --loom-device URI that names a device (anything between "amdgpu://" and
+// its options), rather than Loom's default one.
+inline bool NamesDevice(std::string_view uri) {
+  const auto scheme = uri.find("://");
+  if (scheme == std::string_view::npos)
+    return !uri.empty();
+  const auto rest = uri.substr(scheme + 3);
+  return !rest.empty() && rest.front() != '?';
+}
 
 inline Gpu FirstGpu(const fs::path& topology = "/sys/class/kfd/kfd/topology/nodes") {
   std::error_code error;
@@ -80,9 +98,10 @@ inline std::string GpuName(unsigned target) {
 }
 
 // The preset to serve: the requested one, the card's only one, or the one
-// loom-fun cards publish for this GPU (`chat` for Strix Halo gfx1151,
-// `chat-gfx1150`, `chat-r9700` for a gfx1201 with 32 GB, `chat-16gb` for
-// 16 GB gfx1201 cards). Empty lets Loom decide (one preset).
+// loom-fun cards publish for this GPU: `chat` for Strix Halo (gfx1151),
+// `chat-gfx1150` (else `chat`) for gfx1150, `chat-r9700` for a gfx1201 with
+// 24 GB or more (else `chat-16gb`). Without KFD, `chat`. Any other GPU needs
+// --loom-preset. Empty lets Loom decide (one preset).
 inline std::string ChoosePreset(const json::Value& card, const std::string& requested,
                                 const Gpu& gpu, std::string* note) {
   if (!requested.empty())
@@ -93,20 +112,21 @@ inline std::string ChoosePreset(const json::Value& card, const std::string& requ
   auto has = [&](std::string_view name) {
     return presets->find(std::string(name)) != nullptr;
   };
+  std::string names;
+  for (const auto& [name, value] : presets->members())
+    names += (names.empty() ? "" : ", ") + name;
+  if (gpu.named_device)
+    throw std::runtime_error("loom: --loom-device names a device: pass --loom-preset too (presets: " +
+                             names + ")");
   std::vector<std::string> wanted;
-  const unsigned family = gpu.target / 100;
-  if (gpu.target == 110500)
+  if (gpu.target == 0 || gpu.target == 110501)
+    wanted = {"chat"};
+  else if (gpu.target == 110500)
     wanted = {"chat-gfx1150", "chat"};
-  else if (family == 1105)
-    wanted = {"chat"};
-  else if (family == 1200 || family == 1201) {
-    if (gpu.memory_bytes >= (std::uint64_t{24} << 30))
-      wanted = {"chat-r9700", "chat-16gb"};
-    else
-      wanted = {"chat-16gb"};
-  } else {
-    wanted = {"chat"};
-  }
+  else if (gpu.target == 120001)
+    wanted = gpu.memory_bytes >= (std::uint64_t{24} << 30)
+                 ? std::vector<std::string>{"chat-r9700", "chat-16gb"}
+                 : std::vector<std::string>{"chat-16gb"};
   for (const auto& name : wanted) {
     if (has(name)) {
       if (note)
@@ -115,9 +135,6 @@ inline std::string ChoosePreset(const json::Value& card, const std::string& requ
       return name;
     }
   }
-  std::string names;
-  for (const auto& [name, value] : presets->members())
-    names += (names.empty() ? "" : ", ") + name;
   throw std::runtime_error("loom: this package has no preset for " +
                            GpuName(gpu.target) + " (presets: " + names +
                            "); pass --loom-preset");
@@ -263,6 +280,23 @@ struct Resolved {
   }
 };
 
+// Removes private package directories (gufo_loom_<pid>_*) of this user's
+// processes that ended without closing their model (a crash, a kill).
+inline void RemoveStale(const fs::path& temp) {
+  std::error_code error;
+  for (const auto& entry : fs::directory_iterator(temp, error)) {
+    const auto name = entry.path().filename().string();
+    if (!name.starts_with("gufo_loom_") || !entry.is_directory(error))
+      continue;
+    struct stat info {};
+    if (lstat(entry.path().c_str(), &info) != 0 || info.st_uid != getuid())
+      continue;
+    const auto pid = std::strtol(name.c_str() + 10, nullptr, 10);
+    if (pid > 0 && kill(static_cast<pid_t>(pid), 0) != 0 && errno == ESRCH)
+      fs::remove_all(entry.path(), error);
+  }
+}
+
 inline Resolved Resolve(const std::string& path, const std::string& requested_preset,
                         const std::map<std::string, fs::path>& origins,
                         const Gpu& gpu) {
@@ -299,39 +333,43 @@ inline Resolved Resolve(const std::string& path, const std::string& requested_pr
   // A directory of links: the package's own entries, plus each found file at
   // its card path. Loom resolves every path the card names inside it.
   const char* base = std::getenv("TMPDIR");
-  std::string pattern = std::string(base && *base ? base : "/tmp") + "/gufo_loom_XXXXXX";
+  const fs::path temp = base && *base ? base : "/tmp";
+  RemoveStale(temp);
+  std::string pattern = (temp / ("gufo_loom_" + std::to_string(getpid()) + "_XXXXXX")).string();
   if (!mkdtemp(pattern.data()))
-    throw std::runtime_error("loom: cannot create a private package directory in " +
-                             fs::path(pattern).parent_path().string());
-  resolved.overlay = pattern;
-  auto link = [&](const fs::path& target, const fs::path& at) {
+    throw std::runtime_error("loom: cannot create a private package directory in " + temp.string());
+  resolved.overlay = pattern;  // from here on, `resolved` removes it on a throw
+  auto link = [](const fs::path& target, const fs::path& at) {
     fs::create_directories(at.parent_path());
     fs::create_symlink(target, at);
   };
-  {
-    const auto absolute_root = fs::absolute(root);
-    std::map<std::string, bool> top_dirs;
-    for (const auto& [card_path, target] : links)
-      top_dirs[fs::path(card_path).begin()->string()] = true;
-    for (const auto& entry : fs::directory_iterator(absolute_root)) {
-      const auto name = entry.path().filename().string();
-      if (top_dirs.contains(name) && entry.is_directory()) {
-        // A card path inside this directory: link its files one by one.
-        for (const auto& inner : fs::recursive_directory_iterator(entry.path())) {
-          if (inner.is_directory())
-            continue;
-          link(inner.path(), resolved.overlay / fs::relative(inner.path(), absolute_root));
-        }
-        continue;
-      }
+  const auto absolute_root = fs::absolute(root);
+  std::set<std::string> parents;  // first components of the card paths to place
+  for (const auto& [card_path, target] : links)
+    if (fs::path(card_path).has_parent_path())
+      parents.insert(fs::path(card_path).begin()->string());
+  for (const auto& entry : fs::directory_iterator(absolute_root)) {
+    const auto name = entry.path().filename().string();
+    if (!parents.contains(name)) {
       link(entry.path(), resolved.overlay / name);
+      continue;
     }
-    for (const auto& [card_path, target] : links) {
-      const auto at = resolved.overlay / card_path;
-      if (!fs::exists(fs::symlink_status(at)))
-        link(target, at);
+    // A directory the card places files in: a real one here, holding links
+    // to the package's own files in it.
+    if (!fs::is_directory(entry.path()))
+      throw std::runtime_error("loom: the package has a file '" + name +
+                               "' where its card expects a directory");
+    for (const auto& inner : fs::recursive_directory_iterator(
+             entry.path(), fs::directory_options::follow_directory_symlink)) {
+      if (!inner.is_directory())
+        link(inner.path(), resolved.overlay / name / fs::relative(inner.path(), entry.path()));
     }
-  }  // on a throw, `resolved` removes the directory
+  }
+  for (const auto& [card_path, target] : links) {
+    const auto at = resolved.overlay / card_path;
+    if (!fs::exists(fs::symlink_status(at)))
+      link(target, at);
+  }
   resolved.load_path = resolved.overlay.string();
   return resolved;
 }

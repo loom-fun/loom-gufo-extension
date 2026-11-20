@@ -121,7 +121,12 @@ public:
               options, std::string("--loom-") + origin))
         origins.emplace(origin, *value);
     }
-    package_ = package::Resolve(path, preset, origins, package::FirstGpu());
+    // The preset follows the GPU Loom opens by default (the first KFD GPU); a
+    // named --loom-device needs --loom-preset when the card has several.
+    auto gpu = package::FirstGpu();
+    if (package::NamesDevice(device))
+      gpu = {.named_device = true};
+    package_ = package::Resolve(path, preset, origins, gpu);
     preset = package_.preset;
     if (!package_.note.empty())
       std::fprintf(stderr, "loom: %s\n", package_.note.c_str());
