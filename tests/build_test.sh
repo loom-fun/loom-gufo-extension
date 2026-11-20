@@ -40,6 +40,9 @@ wait
 $CXX $FLAGS -c "$here/../src/loom_chat.cpp" -o "$OUT/loom_chat.o" &
 $CXX $FLAGS -c "$here/fake_embed.cpp" -o "$OUT/fake_embed.o" &
 $CXX $FLAGS -c "$here/runner_logits_test.cpp" -o "$OUT/runner_logits_test.o" &
+$CXX $FLAGS -c "$here/package_test.cpp" -o "$OUT/package_test.o" &
 wait
 $CXX "${objs[@]}" "$OUT/fake_embed.o" "$OUT/loom_chat.o" "$OUT/runner_logits_test.o" -o "$OUT/runner_logits_test" "$OUT/cargo/release/libgufo_rust.a" -lpthread -ldl -lcrypto -Wl,--unresolved-symbols=ignore-all $(pkg-config --libs icu-uc icu-i18n 2>/dev/null || echo "-licuuc -licui18n")
 "$OUT/runner_logits_test"
+$CXX "$OUT/package_test.o" "$OUT/json.o" -o "$OUT/package_test" "$OUT/cargo/release/libgufo_rust.a" -lpthread -ldl
+"$OUT/package_test"

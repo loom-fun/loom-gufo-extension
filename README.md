@@ -1,18 +1,41 @@
 # loom-gufo-extension
 
-Runs [loom-fun](https://huggingface.co/loom-fun) Loom model packages in [Gufo](https://github.com/gufo-org/gufo) on
-Strix Halo as ordinary Gufo text models: Gufo's server, API endpoints, prompt cache and parsers, with the package's
-own Loom kernels doing the model work. It runs Loom SDK 0.2.0 (`hrx-loom` 0.2.0, ROCm/hrx-system v0.2.0) and the
-loom-fun packages built for it, on Gufo main from [ec6d3d07](https://github.com/gufo-org/gufo/commit/ec6d3d07) on
-(extension API 0.3.35, which added model directories and the grammar hooks this extension uses).
+48 open models, from Qwen3 0.6B to Qwen3.6 35B-A3B, gemma 4, gpt-oss 20B, Llama 3.2, LFM, Nemotron and more, served by
+[Gufo](https://github.com/gufo-org/gufo) on [AMD Loom](https://github.com/ROCm/hrx-system) kernels. Each model is a
+[loom-fun](https://huggingface.co/loom-fun) package of Loom programs for an unmodified GGUF; Gufo keeps everything
+else: its OpenAI, Anthropic and llama-server APIs, scheduler, prompt cache, tool calls, reasoning, grammars and
+`gufo model`. On Strix Halo, Loom decodes faster than llama.cpp ROCm on 43 of the 47 measured packages (the other 4
+tie, within ±3 %) and prefills a 32k-token prompt faster on 45 of 46, by a median of 17 % and 53 % (see
+[Models](#models)).
 
-Maintainer: [@jeremyfowers](https://github.com/jeremyfowers). Platform: Linux x86-64, Strix Halo (gfx1151) with the
-amdgpu driver; Loom also serves the Radeon AI PRO R9700 (`chat-r9700` presets). License: MIT (`LICENSE`).
+Maintainer: [@jeremyfowers](https://github.com/jeremyfowers). Platform: Linux x86-64 with the amdgpu driver, tested
+on Strix Halo (gfx1151). Packages that publish Radeon AI PRO R9700 or 16 GB gfx1201 presets get them automatically on
+those GPUs, where Loom serves them, but this release's Gufo runs are Strix Halo only.
+License: MIT (`LICENSE`). Needs Gufo with extension API 0.3.35 (gufo-org/gufo main from
+[ec6d3d07](https://github.com/gufo-org/gufo/commit/ec6d3d07)).
+
+## Quick start
+
+With [Nix](https://nixos.org/download/) (flakes on, and Gufo's binary cache: see [Install](#install)):
+
+```sh
+nix profile install github:loom-fun/loom-gufo-extension    # gufo with this extension (or `nix run ...#default --`)
+gufo model install qwen3-4b-loom                            # the package and its GGUF, verified (3.1 GB)
+gufo serve llm --model qwen3-4b-loom                        # 127.0.0.1:8080
+```
+
+```sh
+curl -s localhost:8080/v1/chat/completions -H 'Content-Type: application/json' \
+  -d '{"model":"Qwen/Qwen3-4B","messages":[{"role":"user","content":"Hello!"}]}'
+```
+
+`gufo model list` shows every model; pick any ID from the table below. The extension serves the preset the package
+publishes for your GPU (`loom: preset chat for gfx1151` in the log; `--loom-preset` picks another).
 
 ## Install
 
-Needs Linux x86-64 and [Nix](https://nixos.org/download/) with flakes. Gufo's binary cache avoids building ROCm's LLVM
-from source (hours): put these lines in `/etc/nix/nix.conf` (and restart the Nix daemon), or in `NIX_CONFIG`:
+Gufo's binary cache avoids building ROCm's LLVM from source (hours). Put these lines in `/etc/nix/nix.conf` (and
+restart the Nix daemon), or in `NIX_CONFIG`:
 
 ```
 experimental-features = nix-command flakes
@@ -21,43 +44,43 @@ extra-trusted-public-keys = gufo.cachix.org-1:rfZe3n4lHINgyoACKzs5EthIZmBNvEyCCt
 ```
 
 The extension links `libloom_text_embed`, Loom's text model layer behind a small C API (`loom-embed/`), built from the
-pinned hrx-system release by `nix/runtime.nix` with the nixpkgs Gufo pins (a few minutes; it needs no ROCm). Install
-Gufo with its extension SDK, build the library, and install the extension as a module with the library on
-`CMAKE_PREFIX_PATH`:
+pinned hrx-system release by `nix/runtime.nix` with the nixpkgs Gufo pins (a few minutes; it needs no ROCm). Three
+ways to get Gufo with it:
 
-```sh
-GUFO=github:gufo-org/gufo                        # or github:gufo-org/gufo/<revision>, the same one for both
-nix profile install $GUFO#sdk
-git clone https://github.com/loom-fun/loom-gufo-extension
-LOOM=$(nix build --impure --no-link --print-out-paths --expr \
-  "import $PWD/loom-gufo-extension/nix/runtime.nix { gufo = builtins.getFlake \"$GUFO\"; }")
-CMAKE_PREFIX_PATH=$LOOM gufo extension install loom      # the reviewed release from the Gufo extension registry
-gufo diagnose --section extensions                      # lists "provider loom-text: available"
-```
+- **This flake** (Quick start): Gufo at the revision in `flake.lock`, with the extension built as a module and the
+  library. `nix build github:loom-fun/loom-gufo-extension#runtime` builds the library alone.
+- **Your Gufo, as a module** from the [Gufo extension registry](https://github.com/gufo-org/gufo-extension), with the
+  library on `CMAKE_PREFIX_PATH` for the build:
 
-`gufo extension install https://github.com/loom-fun/loom-gufo-extension@<commit or tag>` installs a revision that is
-not in the registry. Keep `CMAKE_PREFIX_PATH=$LOOM` for `gufo extension update` after upgrading Gufo; serving needs
-nothing else (the module finds the library through its run path).
+  ```sh
+  nix profile install github:gufo-org/gufo#sdk
+  LOOM=$(nix build --no-link --print-out-paths github:loom-fun/loom-gufo-extension#runtime)
+  CMAKE_PREFIX_PATH=$LOOM gufo extension install loom
+  gufo diagnose --section extensions              # lists "provider loom-text: available"
+  ```
 
-To compile the extension into your own Gufo build instead:
+  `gufo extension install https://github.com/loom-fun/loom-gufo-extension@<commit or tag>` installs a revision that
+  is not in the registry. Keep `CMAKE_PREFIX_PATH=$LOOM` for `gufo extension update` after upgrading Gufo; serving
+  needs nothing else (the module finds the library through its run path). The library is built with the nixpkgs of
+  the Gufo in this repository's `flake.lock`; to match another Gufo exactly, build it with that one:
+  `nix build --impure --expr 'import ./nix/runtime.nix { gufo = builtins.getFlake "github:gufo-org/gufo/<rev>"; }'`.
+- **Compiled into your own Gufo build:**
 
-```sh
-git clone https://github.com/gufo-org/gufo
-git clone https://github.com/loom-fun/loom-gufo-extension
-cd gufo
-LOOM=$(nix build --impure --no-link --print-out-paths --expr \
-  "import $PWD/../loom-gufo-extension/nix/runtime.nix { gufo = builtins.getFlake \"path:$PWD\"; }")
-nix develop --impure --expr "(builtins.getFlake \"path:$PWD\").packages.x86_64-linux.default" --command bash -c "
-  export PKG_CONFIG_PATH=$LOOM/lib/pkgconfig:\$PKG_CONFIG_PATH && eval \"\$preConfigure\" &&
-  cmake -S . -B build -G Ninja \$cmakeFlags -DENGINE_ENABLE_HIP=ON -DGUFO_EXTENSIONS=loom \
-    -DGUFO_EXTENSION_DIRS=$PWD/../loom-gufo-extension &&
-  cmake --build build --target gufo"
-build/gufo diagnose --section extensions
-cd ..
-```
+  ```sh
+  git clone https://github.com/gufo-org/gufo
+  git clone https://github.com/loom-fun/loom-gufo-extension
+  cd gufo
+  LOOM=$(nix build --impure --no-link --print-out-paths --expr \
+    "import $PWD/../loom-gufo-extension/nix/runtime.nix { gufo = builtins.getFlake \"path:$PWD\"; }")
+  nix develop --impure --expr "(builtins.getFlake \"path:$PWD\").packages.x86_64-linux.default" --command bash -c "
+    export PKG_CONFIG_PATH=$LOOM/lib/pkgconfig:\$PKG_CONFIG_PATH && eval \"\$preConfigure\" &&
+    cmake -S . -B build -G Ninja \$cmakeFlags -DENGINE_ENABLE_HIP=ON -DGUFO_EXTENSIONS=loom \
+      -DGUFO_EXTENSION_DIRS=$PWD/../loom-gufo-extension &&
+    cmake --build build --target gufo"
+  ```
 
 No Nix on the machine (or no root)? Run the same commands in the `nixos/nix` image, keeping `/nix` in a named volume so
-the installed Gufo and the library are still there when you serve:
+Gufo and the library are still there when you serve:
 
 ```sh
 docker run --rm -it -v gufo-nix:/nix -v $PWD:$PWD -w $PWD -e NIX_CONFIG="$(printf '%s\n' \
@@ -66,94 +89,32 @@ docker run --rm -it -v gufo-nix:/nix -v $PWD:$PWD -w $PWD -e NIX_CONFIG="$(print
 ```
 
 To serve from it, add `--device /dev/kfd --device /dev/dri --security-opt seccomp=unconfined --ulimit memlock=-1
---network host`, and mount the Hugging Face cache at the same path (see Quick start and Limits).
+--network host`, and keep the model directory (`GUFO_MODELS_DIR`) on a volume.
 
-## Quick start
+## Models
 
-On Strix Halo (gfx1151) with the amdgpu driver, after Install:
+`gufo model install <ID>` downloads the loom-fun package and the GGUF files its card names (the checkpoint, and a
+drafter or vision projector where the package uses one), pinned by revision, size and SHA-256 in `models.lock.json`,
+and reuses files already in the Hugging Face cache. The extension finds those files in the model directory, so
+`--model <ID>` is all `gufo serve`, `prompt`, `chat` and `bench` need. A package fetched with `loom-fetch
+huggingface:loom-fun/<repo>:<preset> --output=<dir>` (`pipx install 'hrx-loom[hf]==0.2.0'`) works too: `--model <dir>`.
 
-```sh
-pipx install 'hrx-loom[hf]==0.2.0'     # loom-fetch (and loom-serve); pipx: `sudo apt install pipx` or `python3 -m pip install --user pipx`
-loom-fetch huggingface:loom-fun/ggml-org-Qwen3-4B-loom:chat --output=models/qwen3-4b --no-input
-gufo serve llm --model models/qwen3-4b --sessions 4     # listens on 127.0.0.1:8080 (--host, --port)
-curl -s localhost:8080/v1/chat/completions -H 'Content-Type: application/json' \
-  -d '{"model":"Qwen/Qwen3-4B","messages":[{"role":"user","content":"Hello!"}]}'
-```
+The extension bundles no weights. They keep their upstream license (Apache 2.0 for Qwen, the Gemma terms, the Llama 3.2
+Community License, LFM 1.0, ...), which `gufo model list --json` and each package card name. Use a model only under its
+license.
 
-Any model in the table below works the same way: `loom-fetch huggingface:loom-fun/<repo>:chat --output=<dir>
---no-input`. `chat` is the Strix Halo preset; packages tuned for the Radeon AI PRO R9700 also carry `chat-r9700`
-(`huggingface:loom-fun/<repo>:chat-r9700`). Gufo serves the fetched preset without any flag. Packages need Loom 0.2.0:
-fetch them again if they were fetched for 0.1.0. The request's `model` is the name in the table (`GET /v1/models` lists
-it). `loom-fetch` links the weights from the Hugging Face cache (`~/.cache/huggingface`), so the cache must stay where
-it was (and be mounted at the same path in a container); a package takes about its GGUF's size on disk.
+Throughput: the package cards' measurements on AMD DevLab Strix Halo runners (Loom 0.2.0 and llama.cpp ROCm b1374, same
+GGUF, same runner type, out of the box; the cards link each run and add Vulkan, longer contexts and the R9700). Through
+Gufo, Loom decoded at 99-105 % of loom-serve's speed on the same machine (Loom 0.1.0, `DESIGN.md`); Gufo's own
+throughput per model is in `validation/results/models.md`. Gufo checks: Gufo's 29 API
+conformance checks with `--logits`, on the installed model (`validation/results/models.md` explains each failure).
+
+<!-- models table: tools/models_table.py -->
+<!-- end models table -->
 
 **Logits:** forced or named `tool_choice`, strict tool schemas, `response_format`, `logprobs`, `min_p` and penalties
-need a package that returns logits, as the loom-fun packages do. The server log says `loom: logits on (...)`. Without
-logits those features are not enforced: a forced `tool_choice` returns an error (`tool_choice_unsatisfied`) when the
-model does not call, `response_format` is only asked of the model, and `logprobs`, `min_p` and penalties are ignored.
-
-## Models and weights
-
-The extension bundles no weights. Each [loom-fun](https://huggingface.co/loom-fun) package holds the Loom programs and
-links a GGUF from its upstream Hugging Face repository, which `loom-fetch` downloads into the Hugging Face cache. The
-weights keep their upstream license (Apache 2.0 for Qwen, the Gemma terms, the Llama 3.2 Community License, and so on);
-each package's card names it and links the source. Use a model only under its license.
-
-
-The loom-fun packages of 35B parameters or less, on Strix Halo. Loom: through Gufo with this extension, a 32,000-token
-prompt for pp32k and single-stream decode after a short prompt (measured 2026-11-16 with Loom 0.1.0). llama.cpp (ROCm
-b1374): the package card's baseline.
-
-| Model | Loom pp32k (tok/s) | llama.cpp pp32k (tok/s) | Loom decode (tok/s) | llama.cpp decode (tok/s) |
-|---|---|---|---|---|
-| [Qwen/Qwen3-0.6B](https://huggingface.co/loom-fun/unsloth-Qwen3-0.6B-loom) | 3088 | 2717 | 340.0 | 266.4 |
-| [Qwen/Qwen2.5-0.5B-Instruct](https://huggingface.co/loom-fun/bartowski-Qwen2.5-0.5B-Instruct-loom) | 7451 | 6501 | 360.9 | 293.4 |
-| [Qwen/Qwen3.5-0.8B](https://huggingface.co/loom-fun/unsloth-Qwen3.5-0.8B-loom) | 8011 | 5639 | 260.5 | 202.0 |
-| [google/gemma-3-1b-it](https://huggingface.co/loom-fun/ggml-org-gemma-3-1b-it-loom) | 5690 | — | 204.9 | 168.3 |
-| [Qwen/Qwen2.5-1.5B-Instruct](https://huggingface.co/loom-fun/bartowski-Qwen2.5-1.5B-Instruct-loom) | 2470 | 2576 | 173.4 | 156.0 |
-| [LiquidAI/LFM3-Omni-2B](https://huggingface.co/loom-fun/ggml-org-LFM3-Omni-2B-loom) | 5357 | 4330 | 165.7 | 148.1 |
-| [LiquidAI/LFM3-1.7B](https://huggingface.co/loom-fun/bartowski-LFM3-1.7B-loom) | 5313 | 4128 | 166.0 | 137.4 |
-| [naver-hyperclovax/HyperCLOVAX-SEED-Text-Instruct-1.5B](https://huggingface.co/loom-fun/rippertnt-HyperCLOVAX-SEED-Text-Instruct-1.5B-loom) | 2859 | 2308 | 174.4 | 155.6 |
-| [Qwen/Qwen3-1.7B](https://huggingface.co/loom-fun/ggml-org-Qwen3-1.7B-loom) | 2470 | 2030 | 159.8 | 144.0 |
-| [Qwen/Qwen3.5-2B](https://huggingface.co/loom-fun/unsloth-Qwen3.5-2B-loom) | 5093 | 3489 | 139.8 | 118.3 |
-| [meta-llama/Llama-3.2-3B-Instruct](https://huggingface.co/loom-fun/unsloth-Llama-3.2-3B-Instruct-loom) | 1333 | 1075 | 94.7 | 90.2 |
-| [Qwen/Qwen3-4B-Instruct-2507](https://huggingface.co/loom-fun/unsloth-Qwen3-4B-Instruct-2507-loom) | 1095 | 867 | 75.3 | 73.5 |
-| [XHToken/Spark-X2.5-4B](https://huggingface.co/loom-fun/XHToken-Spark-X2.5-4B-loom) | 2068 | 1274 | 70.3 | 61.1 |
-| [XHToken/Spark-X2.6-4B](https://huggingface.co/loom-fun/bartowski-Spark-X2.6-4B-loom) | 2049 | 1340 | 69.7 | 61.5 |
-| [Qwen/Qwen3-4B](https://huggingface.co/loom-fun/ggml-org-Qwen3-4B-loom) | 1078 | 868 | 102.2 | 74.1 |
-| [Qwen/Qwen3-VL-4B-Instruct](https://huggingface.co/loom-fun/unsloth-Qwen3-VL-4B-Instruct-loom) | 1097 | 838 | 75.1 | 71.1 |
-| [Qwen/Qwen3.5-4B](https://huggingface.co/loom-fun/unsloth-Qwen3.5-4B-loom) | 2202 | 1353 | 85.6 | 55.9 |
-| [google/gemma-4-E2B-it](https://huggingface.co/loom-fun/unsloth-gemma-4-E2B-it-loom) | 2585 | 4432 | 148.5 | 108.6 |
-| [Qwen/Qwen2.5-7B-Instruct](https://huggingface.co/loom-fun/bartowski-Qwen2.5-7B-Instruct-loom) | 1120 | 826 | 46.1 | 46.4 |
-| [Qwen/Qwen2.5-VL-7B-Instruct](https://huggingface.co/loom-fun/ggml-org-Qwen2.5-VL-7B-Instruct-loom) | 1113 | 807 | 46.0 | 46.2 |
-| [google/gemma-4-E4B-it](https://huggingface.co/loom-fun/unsloth-gemma-4-E4B-it-loom) | 1892 | 1912 | 86.7 | 75.4 |
-| [Qwen/Qwen3-8B](https://huggingface.co/loom-fun/unsloth-Qwen3-8B-loom) | 846 | 656 | 49.7 | 52.3 |
-| [Qwen/Qwen3-VL-8B-Instruct](https://huggingface.co/loom-fun/unsloth-Qwen3-VL-8B-Instruct-loom) | 869 | 658 | 40.6 | 42.0 |
-| [deepreinforce-ai/Ornith-1.0-9B](https://huggingface.co/loom-fun/unsloth-Ornith-1.0-9B-loom) | 1439 | 916 | 36.5 | 37.2 |
-| [google/gemma-4-12B-it](https://huggingface.co/loom-fun/unsloth-gemma-4-12B-it-loom) | 702 | 525 | 42.9 | 29.7 |
-| [ornith-ai/Ornith-1.5-9B](https://huggingface.co/loom-fun/bartowski-Ornith-1.5-9B-loom) | 1394 | 850 | 51.2 | 38.9 |
-| [nemotron-3.5-bolt-e4b](https://huggingface.co/loom-fun/nvidia-NVIDIA-Nemotron-3.5-Bolt-E4B-4GB-loom) | 1867 | 1219 | 81.1 | 54.9 |
-| [Qwen/Qwen3.5-9B](https://huggingface.co/loom-fun/unsloth-Qwen3.5-9B-loom) | 1398 | 884 | 53.9 | 36.5 |
-| [JetBrains/Mellum2.1-12B-A2.5B-Thinking](https://huggingface.co/loom-fun/bartowski-Mellum2.1-12B-A2.5B-Thinking-loom) | 2762 | 1752 | 95.2 | 76.0 |
-| [Qwen/Qwen3-14B](https://huggingface.co/loom-fun/ggml-org-Qwen3-14B-loom) | 544 | 331 | 24.7 | 24.5 |
-| [openai/gpt-oss-20b](https://huggingface.co/loom-fun/unsloth-gpt-oss-20b-loom) | 1839 | 1302 | 79.6 | 78.1 |
-| [LiquidAI/LFM2.5-24B-A2B](https://huggingface.co/loom-fun/ggml-org-LFM2.5-24B-A2B-loom) | 2842 | 1911 | 104.8 | 99.2 |
-| [google/gemma-4-26B-A4B-it](https://huggingface.co/loom-fun/lmstudio-community-gemma-4-26B-A4B-it-loom) | 1395 | 917 | 62.2 | 34.2 |
-| [Qwen/Qwen3-Coder-30B-A3B-Instruct](https://huggingface.co/loom-fun/ggml-org-Qwen3-Coder-30B-A3B-Instruct-loom) | 899 | 648 | 64.0 | 28.9 |
-| [qwen3.8-27b](https://huggingface.co/loom-fun/bartowski-Qwen3.8-27B-loom) | 442 | 294 | 21.1 | 21.1 |
-| [Qwen/Qwen3-30B-A3B-Instruct-2507](https://huggingface.co/loom-fun/unsloth-Qwen3-30B-A3B-Instruct-2507-loom) | 911 | 635 | 84.3 | 76.5 |
-| [google/gemma-4-31B-it](https://huggingface.co/loom-fun/unsloth-gemma-4-31B-it-loom) | 282 | 195 | 20.2 | 16.1 |
-| [Qwen/Qwen2.5-32B-Instruct](https://huggingface.co/loom-fun/bartowski-Qwen2.5-32B-Instruct-loom) | 274 | 175 | 11.2 | 11.2 |
-| [poolside/Laguna-XS-2.1](https://huggingface.co/loom-fun/ggml-org-Laguna-XS-2.1-loom) | 1376 | 636 | 41.1 | 49.5 |
-| [Nanbeige/Nanbeige4.3-33B](https://huggingface.co/loom-fun/bartowski-Nanbeige4.3-33B-loom) | 259 | 186 | 11.0 | 10.6 |
-| [Qwen/Qwen3.6-27B](https://huggingface.co/loom-fun/ggml-org-Qwen3.6-27B-loom) | 437 | 317 | 21.8 | 15.8 |
-| [Qwen/Qwen3.6-35B-A3B](https://huggingface.co/loom-fun/ggml-org-Qwen3.6-35B-A3B-loom) | 1947 | 1048 | 74.8 | 57.1 |
-| [ornith-ai/Ornith-1.0-35B](https://huggingface.co/loom-fun/lmstudio-community-Ornith-1.0-35B-loom) | 1982 | 1058 | 72.5 | 65.7 |
-| [openbmb/MiniCPM-V-4.7-35B-A3B](https://huggingface.co/loom-fun/bartowski-MiniCPM-V-4.7-35B-A3B-loom) | 1992 | 1069 | 59.7 | 52.6 |
-| [InternScience/Sage-A1.5](https://huggingface.co/loom-fun/InternScience-Sage-A1.5-loom) | 1976 | 994 | 69.7 | 71.2 |
-| [Qwen/Qwen3.5-35B-A3B](https://huggingface.co/loom-fun/unsloth-Qwen3.5-35B-A3B-loom) | 1952 | 1072 | 73.7 | 53.1 |
-| [ornith-ai/Ornith-1.5-35B-A3B](https://huggingface.co/loom-fun/bartowski-Ornith-1.5-35B-A3B-loom) | 1937 | 986 | 63.5 | 38.8 |
-| [meta-models/Muse-Glimmer-30B](https://huggingface.co/loom-fun/ggml-org-Muse-Glimmer-30B-loom) | 444 | 358 | 29.2 | 21.0 |
+sample on the host from the package's logits (every package above returns them; the log says `loom: logits on`).
+Those requests run without drafting, so they decode somewhat slower; every other request keeps the device path.
 
 ## How it works
 
@@ -166,11 +127,6 @@ the loom-fun cards serve; N makes it an elastic pool with that budget, which pre
 long prompts when small), `--loom-preset NAME` (only for a package directory that holds several presets),
 `--loom-logits auto|on|off`. `--cache-disk DIR` keeps the prompt cache across restarts (its checkpoint images need the
 elastic pool, which the extension then uses).
-
-## Logits
-
-Requests that need logits (see Quick start) sample on the host and run without drafting, so they decode somewhat
-slower; every other request keeps the device path.
 
 ## Limits
 
@@ -196,11 +152,18 @@ shows too:
 
 | Version | Gufo | Notes |
 |---|---|---|
-| 0.2.0 | extension API >= 0.3.35 (gufo-org/gufo main from ec6d3d07) | Loom SDK 0.2.0 (hrx-system v0.2.0), the first release for the Gufo extension registry; pinned hrx-system downloads as Nix `fetchurl`s |
+| 0.3.0 | extension API >= 0.3.35 (gufo-org/gufo main from ec6d3d07) | 48 loom-fun packages as Gufo models (`gufo model install`); the package's preset for the GPU chosen automatically; packages served as published, with `--loom-checkpoint`/`--loom-drafter`/`--loom-vision`; `flake.nix` (Gufo with this extension, and the Loom library) |
+| 0.2.0 | extension API >= 0.3.35 (gufo-org/gufo main from ec6d3d07) | Loom SDK 0.2.0 (hrx-system v0.2.0) on Gufo main; pinned hrx-system downloads as Nix `fetchurl`s |
 | 0.1.0 | gufo-org/gufo#1243 branch | Loom SDK 0.1.0 prototype |
 
 ## Development
 
-Runner tests (no GPU, against a fake `libloom_text_embed`): `GUFO=<gufo checkout> tests/build_test.sh` (needs g++ 13+
-and Cargo). After changing the hrx-system pin in `nix/loom-runtime.nix`, regenerate its downloads:
-`python3 nix/hrx-deps.py generate <hrx-system checkout> nix/hrx-deps.nix`.
+- Tests (no GPU, against a fake `libloom_text_embed`): `GUFO=<gufo checkout> tests/build_test.sh` runs the runner's
+  host-sampling tests and `tests/package_test.cpp` (presets, parameter files by origin). Needs g++ 13+ and Cargo.
+- Models: add a loom-fun repository to `tools/models.txt`, then `python3 tools/models.py` (pins each package's revision
+  and its origins into `extension.json`), `python3 <gufo>/tools/models/lock.py .` (`models.lock.json`) and
+  `python3 tools/models_table.py --readme` (the table above). Validate each with `validation/conformance.py --logits` on
+  `gufo serve llm --model <ID>`; `validation/models_report.py` writes `validation/results/models.md`.
+- hrx-system pin: after changing it in `nix/loom-runtime.nix`, regenerate its downloads with
+  `python3 nix/hrx-deps.py generate <hrx-system checkout> nix/hrx-deps.nix`.
+- `nix flake lock --update-input gufo` moves the flake to a newer Gufo.

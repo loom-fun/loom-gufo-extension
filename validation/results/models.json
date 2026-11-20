@@ -1,0 +1,219 @@
+{
+ "qwen3-0.6b-loom": {
+  "conformance": "29/29",
+  "failed": [],
+  "bench": {
+   "decode": 344.3543965128741,
+   "prefill": 8673.61187646673,
+   "c4": 1141.2498294052566
+  }
+ },
+ "qwen2.5-0.5b-instruct-loom": {
+  "conformance": "29/29",
+  "failed": [],
+  "bench": {
+   "decode": 366.8656355889341,
+   "prefill": 14099.350746166245,
+   "c4": 1292.3645947400364
+  }
+ },
+ "qwen3.5-0.8b-loom": {
+  "conformance": "29/29",
+  "failed": [],
+  "bench": {
+   "decode": 258.48875937479056,
+   "prefill": 11731.263346984806,
+   "c4": 764.1648769426959
+  }
+ },
+ "gemma-3-1b-it-loom": {
+  "conformance": "21/28",
+  "failed": [
+   "tool call (auto)",
+   "streamed tool call",
+   "tool_choice required",
+   "tool_choice named",
+   "strict tool schema",
+   "Responses API (text + function call)",
+   "Anthropic Messages (text + tool_use)"
+  ],
+  "bench": {
+   "decode": 207.7097584691407,
+   "prefill": 11190.387362557474,
+   "c4": 663.8516688173058
+  }
+ },
+ "qwen2.5-1.5b-instruct-loom": {
+  "conformance": "29/29",
+  "failed": [],
+  "bench": {
+   "decode": 182.5211624025905,
+   "prefill": 5893.606190723287,
+   "c4": 639.4800408586368
+  }
+ },
+ "lfm3-omni-2b-loom": {
+  "conformance": "29/29",
+  "failed": [],
+  "bench": {
+   "decode": 172.2800144223299,
+   "prefill": 7329.054836676243,
+   "c4": 614.4969102416164
+  }
+ },
+ "lfm3-1.7b-loom": {
+  "conformance": "29/29",
+  "failed": [],
+  "bench": {
+   "decode": 171.9675009170839,
+   "prefill": 7169.50507178951,
+   "c4": 608.619922642056
+  }
+ },
+ "hyperclovax-seed-text-instruct-1.5b-loom": {
+  "conformance": "21/28",
+  "failed": [
+   "tool call (auto)",
+   "streamed tool call",
+   "tool_choice required",
+   "tool_choice named",
+   "strict tool schema",
+   "Responses API (text + function call)",
+   "Anthropic Messages (text + tool_use)"
+  ],
+  "bench": {
+   "decode": 181.06561027877154,
+   "prefill": 5969.344157559947,
+   "c4": 642.2973727742053
+  }
+ },
+ "qwen3-1.7b-loom": {
+  "conformance": "29/29",
+  "failed": [],
+  "bench": {
+   "decode": 164.73333806934158,
+   "prefill": 5153.494708685478,
+   "c4": 545.9646157498478
+  }
+ },
+ "qwen3.5-2b-loom": {
+  "conformance": "28/29",
+  "failed": [
+   "reasoning effort"
+  ],
+  "bench": {
+   "decode": 145.03400059533666,
+   "prefill": 6441.60205581224,
+   "c4": 383.5477342679603
+  }
+ },
+ "llama-3.2-3b-instruct-loom": {
+  "conformance": "28/29",
+  "failed": [
+   "tool round trip"
+  ],
+  "bench": {
+   "decode": 98.49949572353489,
+   "prefill": 2901.264363672789,
+   "c4": 309.218189638038
+  }
+ },
+ "qwen3-4b-instruct-2507-loom": {
+  "conformance": "29/29",
+  "failed": [],
+  "bench": {
+   "decode": 77.39607474397894,
+   "prefill": 2254.5577545551005,
+   "c4": 250.06427735391293
+  }
+ },
+ "spark-x2.5-4b-loom": {
+  "conformance": "29/29",
+  "failed": [],
+  "bench": {
+   "decode": 72.66135677241702,
+   "prefill": 2774.0192633030333,
+   "c4": 254.0362142629868
+  }
+ },
+ "spark-x2.6-4b-loom": {
+  "conformance": "29/29",
+  "failed": [],
+  "bench": {
+   "decode": 72.45764022999148,
+   "prefill": 2752.867306553329,
+   "c4": 218.88976868786278
+  }
+ },
+ "qwen3-4b-loom": {
+  "conformance": "29/29",
+  "failed": [],
+  "bench": {
+   "decode": 104.81357353603099,
+   "prefill": 2209.2848430435197,
+   "c4": 225.88418227216079
+  }
+ },
+ "qwen3-vl-4b-instruct-loom": {
+  "conformance": "29/29",
+  "failed": [],
+  "bench": {
+   "decode": 78.32113582537173,
+   "prefill": 2241.089908347981,
+   "c4": 266.1174547707707
+  }
+ },
+ "qwen3.5-4b-loom": {
+  "conformance": "29/29",
+  "failed": [],
+  "bench": {
+   "decode": 90.91587246344784,
+   "prefill": 2930.4324562448655,
+   "c4": 192.87377196116898
+  }
+ },
+ "gemma-4-e2b-it-loom": {
+  "conformance": "29/29",
+  "failed": [],
+  "bench": {
+   "decode": 151.83229051851814,
+   "prefill": 3833.5487916901247,
+   "c4": 396.6307236377326
+  }
+ },
+ "qwen2.5-7b-instruct-loom": {
+  "conformance": "29/29",
+  "failed": [],
+  "bench": {
+   "decode": 48.17514622555877,
+   "prefill": 1879.197118442537,
+   "c4": 163.41492868649743
+  }
+ },
+ "qwen2.5-vl-7b-instruct-loom": {
+  "conformance": "21/28",
+  "failed": [
+   "tool call (auto)",
+   "streamed tool call",
+   "tool_choice required",
+   "tool_choice named",
+   "strict tool schema",
+   "Responses API (text + function call)",
+   "Anthropic Messages (text + tool_use)"
+  ],
+  "bench": {
+   "decode": 47.81600475337251,
+   "prefill": 1864.105210240355,
+   "c4": 168.79148048520108
+  }
+ },
+ "gemma-4-e4b-it-loom": {
+  "conformance": "29/29",
+  "failed": [],
+  "bench": {
+   "decode": 85.88355355650341,
+   "prefill": 2528.087454071677,
+   "c4": 219.07269809465538
+  }
+ }
+}

@@ -15,6 +15,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -30,6 +31,8 @@
 #include <gufo/ext/registry.hpp>
 #include <gufo/ext/sha256.hpp>
 #include <gufo/ext/text.hpp>
+
+#include "loom_package.hpp"
 
 namespace gufo::loom {
 
@@ -109,10 +112,27 @@ public:
       logits_mode = *value;
     if (logits_mode != "auto" && logits_mode != "on" && logits_mode != "off")
       throw std::invalid_argument("--loom-logits must be auto, on or off");
+    // The package as published (a loom-fun repository from `gufo model
+    // install`) or as loom-fetch writes it: the preset for this GPU, and
+    // parameter files found by their origin.
+    std::map<std::string, fs::path> origins;
+    for (const char* origin : {"checkpoint", "drafter", "vision"}) {
+      if (const auto* value = ext::FindOption<std::string>(
+              options, std::string("--loom-") + origin))
+        origins.emplace(origin, *value);
+    }
+    package_ = package::Resolve(path, preset, origins, package::FirstGpu());
+    preset = package_.preset;
+    if (!package_.note.empty())
+      std::fprintf(stderr, "loom: %s\n", package_.note.c_str());
+    if (!package_.overlay.empty())
+      std::fprintf(stderr,
+                   "loom: parameter files found by origin in the model "
+                   "directory\n");
     loom_text_embed_options_ex_t embed_options{};
     embed_options.struct_size = sizeof(embed_options);
     embed_options.base = {
-        .model_path = path.c_str(),
+        .model_path = package_.load_path.c_str(),
         .preset = preset.c_str(),
         .device_uri = device.empty() ? nullptr : device.c_str(),
         .memory_bytes = memory,
@@ -211,6 +231,7 @@ public:
   }
 
 private:
+  package::Resolved package_;
   loom_text_embed_t* embed_{nullptr};
   loom_text_embed_info_t info_{};
   loom_text_embed_logits_info_t logits_{};
