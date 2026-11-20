@@ -5,7 +5,7 @@
 # the toolchain is Nix inside the nixos/nix image, so nothing is installed.
 #
 #   build_bundle.sh GUFO_CHECKOUT OUT_DIR
-#     GUFO_CHECKOUT  loom-fun/gufo on the upstream/loom-extension-support branch (gufo-org/gufo#1243)
+#     GUFO_CHECKOUT  a gufo-org/gufo checkout (main at ec6d3d07 or later)
 #
 # Writes OUT_DIR/gufo-loom-<gufo rev>-<ext rev>.tar.gz and its .sha256. The library serves every AMD GPU Loom supports
 # (Strix Halo, Radeon AI PRO R9700, ...). The Nix store lives in the docker volume `loom-bundle-nix`, so later runs take

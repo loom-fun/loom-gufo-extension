@@ -24,7 +24,7 @@ built by this repository's `nix/runtime.nix` (Loom 0.2.0) and serves both GPUs.
 ## Build the bundle (dev box, once per change of the embed, the runner or the extension)
 ```sh
 git clone https://github.com/loom-fun/loom-gufo-extension ext
-git clone -b upstream/loom-extension-support https://github.com/loom-fun/gufo gufo    # gufo-org/gufo#1243
+git clone https://github.com/gufo-org/gufo gufo
 ext/validation/devlab/build_bundle.sh gufo OUT_DIR
 # -> OUT_DIR/gufo-loom-<gufo rev>-<extension rev>.tar.gz (+ .sha256), ~300 MB
 ```

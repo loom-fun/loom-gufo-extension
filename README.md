@@ -3,10 +3,13 @@
 Runs [loom-fun](https://huggingface.co/loom-fun) Loom model packages in [Gufo](https://github.com/gufo-org/gufo) on
 Strix Halo as ordinary Gufo text models: Gufo's server, API endpoints, prompt cache and parsers, with the package's
 own Loom kernels doing the model work. It runs Loom SDK 0.2.0 (`hrx-loom` 0.2.0, ROCm/hrx-system v0.2.0) and the
-loom-fun packages built for it, and builds against Gufo's model-directory support
-([gufo-org/gufo#1243](https://github.com/gufo-org/gufo/pull/1243)).
+loom-fun packages built for it, on Gufo main from [ec6d3d07](https://github.com/gufo-org/gufo/commit/ec6d3d07) on
+(extension API 0.3.35, which added model directories and the grammar hooks this extension uses).
 
-## Build
+Maintainer: [@jeremyfowers](https://github.com/jeremyfowers). Platform: Linux x86-64, Strix Halo (gfx1151) with the
+amdgpu driver; Loom also serves the Radeon AI PRO R9700 (`chat-r9700` presets). License: MIT (`LICENSE`).
+
+## Install
 
 Needs Linux x86-64 and [Nix](https://nixos.org/download/) with flakes. Gufo's binary cache avoids building ROCm's LLVM
 from source (hours): put these lines in `/etc/nix/nix.conf` (and restart the Nix daemon), or in `NIX_CONFIG`:
@@ -17,12 +20,29 @@ extra-substituters = https://gufo.cachix.org
 extra-trusted-public-keys = gufo.cachix.org-1:rfZe3n4lHINgyoACKzs5EthIZmBNvEyCCtufUpth0PE=
 ```
 
-Then, in an empty directory (a few minutes with the cache; Loom itself builds from source in a few more and needs no
-ROCm). Gufo's side of the extension API is in
-[gufo-org/gufo#1243](https://github.com/gufo-org/gufo/pull/1243); until it merges, build Gufo from its branch:
+The extension links `libloom_text_embed`, Loom's text model layer behind a small C API (`loom-embed/`), built from the
+pinned hrx-system release by `nix/runtime.nix` with the nixpkgs Gufo pins (a few minutes; it needs no ROCm). Install
+Gufo with its extension SDK, build the library, and install the extension as a module with the library on
+`CMAKE_PREFIX_PATH`:
 
 ```sh
-git clone -b upstream/loom-extension-support https://github.com/loom-fun/gufo
+GUFO=github:gufo-org/gufo                        # or github:gufo-org/gufo/<revision>, the same one for both
+nix profile install $GUFO#sdk
+git clone https://github.com/loom-fun/loom-gufo-extension
+LOOM=$(nix build --impure --no-link --print-out-paths --expr \
+  "import $PWD/loom-gufo-extension/nix/runtime.nix { gufo = builtins.getFlake \"$GUFO\"; }")
+CMAKE_PREFIX_PATH=$LOOM gufo extension install loom      # the reviewed release from the Gufo extension registry
+gufo diagnose --section extensions                      # lists "provider loom-text: available"
+```
+
+`gufo extension install https://github.com/loom-fun/loom-gufo-extension@<commit or tag>` installs a revision that is
+not in the registry. Keep `CMAKE_PREFIX_PATH=$LOOM` for `gufo extension update` after upgrading Gufo; serving needs
+nothing else (the module finds the library through its run path).
+
+To compile the extension into your own Gufo build instead:
+
+```sh
+git clone https://github.com/gufo-org/gufo
 git clone https://github.com/loom-fun/loom-gufo-extension
 cd gufo
 LOOM=$(nix build --impure --no-link --print-out-paths --expr \
@@ -32,12 +52,12 @@ nix develop --impure --expr "(builtins.getFlake \"path:$PWD\").packages.x86_64-l
   cmake -S . -B build -G Ninja \$cmakeFlags -DENGINE_ENABLE_HIP=ON -DGUFO_EXTENSIONS=loom \
     -DGUFO_EXTENSION_DIRS=$PWD/../loom-gufo-extension &&
   cmake --build build --target gufo"
-build/gufo diagnose --section extensions     # lists "provider loom-text: available"
+build/gufo diagnose --section extensions
 cd ..
 ```
 
 No Nix on the machine (or no root)? Run the same commands in the `nixos/nix` image, keeping `/nix` in a named volume so
-the built binary's libraries are still there when you serve:
+the installed Gufo and the library are still there when you serve:
 
 ```sh
 docker run --rm -it -v gufo-nix:/nix -v $PWD:$PWD -w $PWD -e NIX_CONFIG="$(printf '%s\n' \
@@ -50,12 +70,12 @@ To serve from it, add `--device /dev/kfd --device /dev/dri --security-opt seccom
 
 ## Quick start
 
-On Strix Halo (gfx1151) with the amdgpu driver, from the directory where you ran Build (it holds `gufo/`):
+On Strix Halo (gfx1151) with the amdgpu driver, after Install:
 
 ```sh
 pipx install 'hrx-loom[hf]==0.2.0'     # loom-fetch (and loom-serve); pipx: `sudo apt install pipx` or `python3 -m pip install --user pipx`
 loom-fetch huggingface:loom-fun/ggml-org-Qwen3-4B-loom:chat --output=models/qwen3-4b --no-input
-gufo/build/gufo serve llm --model models/qwen3-4b --sessions 4     # listens on 127.0.0.1:8080 (--host, --port)
+gufo serve llm --model models/qwen3-4b --sessions 4     # listens on 127.0.0.1:8080 (--host, --port)
 curl -s localhost:8080/v1/chat/completions -H 'Content-Type: application/json' \
   -d '{"model":"Qwen/Qwen3-4B","messages":[{"role":"user","content":"Hello!"}]}'
 ```
@@ -72,7 +92,13 @@ need a package that returns logits, as the loom-fun packages do. The server log 
 logits those features are not enforced: a forced `tool_choice` returns an error (`tool_choice_unsatisfied`) when the
 model does not call, `response_format` is only asked of the model, and `logprobs`, `min_p` and penalties are ignored.
 
-## Models
+## Models and weights
+
+The extension bundles no weights. Each [loom-fun](https://huggingface.co/loom-fun) package holds the Loom programs and
+links a GGUF from its upstream Hugging Face repository, which `loom-fetch` downloads into the Hugging Face cache. The
+weights keep their upstream license (Apache 2.0 for Qwen, the Gemma terms, the Llama 3.2 Community License, and so on);
+each package's card names it and links the source. Use a model only under its license.
+
 
 The loom-fun packages of 35B parameters or less, on Strix Halo. Loom: through Gufo with this extension, a 32,000-token
 prompt for pp32k and single-stream decode after a short prompt (measured 2026-11-16 with Loom 0.1.0). llama.cpp (ROCm
@@ -155,6 +181,26 @@ slower; every other request keeps the device path.
   Raise the limit (`ulimit -l unlimited`, `LimitMEMLOCK=infinity`, Docker `--ulimit memlock=-1`) to stream them.
 - gpt-oss and Glimmer: automatic tool choice is not grammar-constrained (the package parses the calls); required and named are.
 
+## Quality
+
+`validation/results/` holds the evidence: Gufo's 29 conformance checks per package (`conformance.md`), throughput
+against llama.cpp (`bench.md`) and the logits features (`logits.md`). Known gaps, all model behavior that loom-serve
+shows too:
+
+- gemma-3-1b, HyperCLOVAX-1.5B and Qwen2.5-VL-7B never call tools (their packages declare no tool-call format), so
+  the 7 tool checks fail on them.
+- Llama-3.2-3B calls the tool again instead of answering; Qwen3.5-0.8B's reasoning can loop to the length limit.
+- Requests that need logits decode somewhat slower (host sampling, no drafting).
+
+## Releases
+
+| Version | Gufo | Notes |
+|---|---|---|
+| 0.2.0 | extension API >= 0.3.35 (gufo-org/gufo main from ec6d3d07) | Loom SDK 0.2.0 (hrx-system v0.2.0), the first release for the Gufo extension registry; pinned hrx-system downloads as Nix `fetchurl`s |
+| 0.1.0 | gufo-org/gufo#1243 branch | Loom SDK 0.1.0 prototype |
+
 ## Development
 
-Runner tests (no GPU, against a fake `libloom_text_embed`): `GUFO=<gufo checkout> tests/build_test.sh`.
+Runner tests (no GPU, against a fake `libloom_text_embed`): `GUFO=<gufo checkout> tests/build_test.sh` (needs g++ 13+
+and Cargo). After changing the hrx-system pin in `nix/loom-runtime.nix`, regenerate its downloads:
+`python3 nix/hrx-deps.py generate <hrx-system checkout> nix/hrx-deps.nix`.

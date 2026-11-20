@@ -182,7 +182,7 @@ public:
   // The grammar's view of the model's own tokens (see loom_dialect.hpp):
   // only for a logits load, which is the only one with grammars.
   [[nodiscard]] std::optional<sampling::JsonConstraint::ToolSyntax>
-  ToolGrammarSyntax() const override {
+  ToolGrammarSyntax(const ext::ChatRequest&) const override {
     return model_->logits().enabled ? native_.tools : std::nullopt;
   }
 

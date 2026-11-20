@@ -2,7 +2,7 @@
   "schema": 1,
   "name": "loom",
   "version": "0.2.0",
-  "api_version": ">= 0.3.16",
+  "api_version": ">= 0.3.35",
   "entry": "loom_register",
   "registration_target": "gufo_loom",
   "depends": [],
