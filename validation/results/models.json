@@ -338,5 +338,21 @@
  "muse-glimmer-30b-loom": {
   "conformance": "29/29",
   "failed": []
+ },
+ "qwen3.8-27b-ud-q4_k_xl-loom": {
+  "conformance": "29/29",
+  "failed": []
+ },
+ "gemma-4-26b-a4b-it-qat-loom": {
+  "conformance": "29/29",
+  "failed": []
+ },
+ "gemma-4-31b-it-qat-loom": {
+  "conformance": "29/29",
+  "failed": []
+ },
+ "flint-loom": {
+  "conformance": "29/29",
+  "failed": []
  }
 }
