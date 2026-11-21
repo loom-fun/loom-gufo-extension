@@ -17,6 +17,7 @@ directory to pin each file's size and SHA-256 in models.lock.json.
     python3 /path/to/gufo/tools/models/lock.py .
     python3 tools/models.py --licenses          # refresh only the license fields
     python3 tools/models.py --check             # every pinned package is built for the runtime's SDK
+    python3 tools/models.py --add               # declare only the repositories new in models.txt
 
 Set HF_TOKEN for higher rate limits; HF_ENDPOINT selects a mirror.
 """
@@ -138,7 +139,7 @@ def describe(card, files):
             quant = match.group(0).upper().replace("UD-", "UD-") if match else None
             break
     extras = []
-    if any(origin == "drafter" for origin, _ in files):
+    if any(origin == "drafter" or Path(path).name.lower().startswith("mtp-") for origin, path in files):
         extras.append("speculative decoding")
     if any(origin == "vision" or "mmproj" in path.lower() for origin, path in files):
         extras.append("vision")
@@ -181,8 +182,11 @@ def declare(repo, sdk):
             licenses.insert(0, value or "no license stated")
         elif value != (licenses[0] if licenses else None):
             licenses.append(f"{origin} ({source['repository']}): {value or 'no license stated'}")
+    quant = next((QUANT.search(Path(path).name) for origin, path in files
+                  if origin == "checkpoint" and "mmproj" not in path.lower()), None)
     return {
         "id": model_id(card),
+        "_quant": quant.group(0).lower() if quant else "",
         "provider": "loom-text",
         "license": license_text(licenses),
         "description": describe(card, files),
@@ -222,17 +226,30 @@ def main():
     if "--check" in sys.argv:
         return check()
     sdk = runtime_sdk()
-    repos = [line.strip() for line in (ROOT / "tools" / "models.txt").read_text().splitlines()
+    # One repository per line, optionally followed by the Gufo model ID to give it.
+    lines = [line.split() for line in (ROOT / "tools" / "models.txt").read_text().splitlines()
              if line.strip() and not line.startswith("#")]
-    models = []
+    repos = [line[0] for line in lines]
+    names = {line[0]: line[1] for line in lines if len(line) > 1}
+    path = ROOT / "extension.json"
+    manifest = json.loads(path.read_text())
+    # --add: declare only the repositories not yet in extension.json; every existing pin stays.
+    models = manifest.get("models", []) if "--add" in sys.argv else []
+    known = {model["components"][0]["source"]["hf"] for model in models}
     for repo in repos:
+        if repo in known:
+            continue
         model = declare(repo, sdk)
+        quant = model.pop("_quant")
+        if repo in names:
+            model["id"] = names[repo]
+        if any(other["id"] == model["id"] for other in models) and quant:
+            # A second package of the same model: its quantization tells them apart.
+            model["id"] = model["id"].removesuffix("-loom") + f"-{quant}-loom"
         if any(other["id"] == model["id"] for other in models):
             raise SystemExit(f"{repo}: model id {model['id']} is taken")
         models.append(model)
         print(f"{model['id']:40} {repo}", file=sys.stderr)
-    path = ROOT / "extension.json"
-    manifest = json.loads(path.read_text())
     manifest["models"] = models
     path.write_text(json.dumps(manifest, indent=2) + "\n")
 
