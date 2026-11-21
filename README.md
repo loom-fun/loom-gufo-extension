@@ -190,7 +190,7 @@ elastic pool, which the extension then uses).
 ## Quality
 
 Every declared model ran Gufo's API conformance checks (`conformance.py --logits`, 29 checks) on Strix Halo,
-24 through `gufo model install` and `--model <ID>` on a local machine and 23 on AMD DevLab runners
+all through `gufo model install` and the installed model, 24 on a local machine and 23 on AMD DevLab runners
 (`validation/results/models.md`, with Gufo's throughput per model). 40 pass all 29; the other 7 miss checks for the
 reasons below.
 
@@ -210,6 +210,7 @@ Earlier evidence in `validation/results/`: images, the disk cache tier and the C
 
 | Version | Gufo | Notes |
 |---|---|---|
+| 0.3.5 | extension API >= 0.3.35 (gufo-org/gufo main from ec6d3d07) | Validation: all 47 models through `gufo model install` (`validation/results/models.md`) |
 | 0.3.4 | extension API >= 0.3.35 (gufo-org/gufo main from ec6d3d07) | Loom SDK release checks: a package built for another SDK is refused at load with what to fetch; `tools/models.py` pins each card's revision for the runtime's SDK (its `v<sdk>` tag, else the default branch) and `--check` verifies the pins |
 | 0.3.3 | extension API >= 0.3.35 (gufo-org/gufo main from ec6d3d07) | Every package pinned at its MIT-licensed card revision (the package files are unchanged) |
 | 0.3.2 | extension API >= 0.3.35 (gufo-org/gufo main from ec6d3d07) | 47 models: gemma-4-12B-it is left out until its drafter (`Anbeeld/gemma4-12B-it-DFlash-GGUF`) declares a license; licenses the Hub knows as tags are read; `tests/build_test.sh` builds with Gufo main's Rust crates (tested on 029a156) |
