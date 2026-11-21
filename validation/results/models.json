@@ -354,5 +354,9 @@
  "flint-loom": {
   "conformance": "29/29",
   "failed": []
+ },
+ "inkling-2-mini-loom": {
+  "conformance": "29/29",
+  "failed": []
  }
 }

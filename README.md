@@ -1,11 +1,11 @@
 # loom-gufo-extension
 
-51 open models, from Qwen3 0.6B to Qwen3.6 35B-A3B, gemma 4, gpt-oss 20B, Llama 3.2, LFM, Nemotron and more, served by
+52 open models, from Qwen3 0.6B to Qwen3.6 35B-A3B, gemma 4, gpt-oss 20B, Llama 3.2, LFM, Nemotron and more, served by
 [Gufo](https://github.com/gufo-org/gufo) on [AMD Loom](https://github.com/ROCm/hrx-system) kernels. Each model is a
 [loom-fun](https://huggingface.co/loom-fun) package of Loom programs for an unmodified GGUF; Gufo keeps everything
 else: its OpenAI, Anthropic and llama-server APIs, scheduler, prompt cache, tool calls, reasoning, grammars and
-`gufo model`. On Strix Halo, Loom decodes faster than llama.cpp ROCm on 45 of the 50 measured packages (the other 5
-tie, within ±3 %) and prefills a 32k-token prompt faster on 48 of 49, by a median of 17 % and 54 % (see
+`gufo model`. On Strix Halo, Loom decodes faster than llama.cpp ROCm on 46 of the 51 measured packages (the other 5
+tie, within ±3 %) and prefills a 32k-token prompt faster on 48 of 49, by a median of 18 % and 54 % (see
 [Models](#models)).
 
 Maintainer: [@jeremyfowers](https://github.com/jeremyfowers). Platform: Linux x86-64 with the amdgpu driver, tested
@@ -164,6 +164,7 @@ conformance checks with `--logits`, on the installed model (`validation/results/
 | `gemma-4-26b-a4b-it-qat-loom` | [google/gemma-4-26B-A4B-it-qat-q4_0-unquantized](https://huggingface.co/loom-fun/unsloth-gemma-4-26B-A4B-it-qat-loom) | 14.5 GB | tools, reasoning, drafting | 102 vs 88 (+16 %) | 1,567 vs 950 (+65 %) | 29/29 |
 | `gemma-4-31b-it-qat-loom` | [google/gemma-4-31B-it-qat-q4_0-unquantized](https://huggingface.co/loom-fun/unsloth-gemma-4-31B-it-qat-loom) | 17.6 GB | tools, reasoning, drafting | 31 vs 31 (-1 %) | 309 vs 211 (+46 %) | 29/29 |
 | `flint-loom` | [flint](https://huggingface.co/loom-fun/ggml-org-Flint-loom) | 23.6 GB | tools, reasoning, drafting | 111 vs 83 (+34 %) | 1,969 vs 1,077 (+83 %) | 29/29 |
+| `inkling-2-mini-loom` | [Inkling-2-Mini](https://huggingface.co/loom-fun/unsloth-Inkling-2-Mini-loom) | 18.1 GB | tools, reasoning, drafting | 43 vs 14 (+214 %) | 1,102 (no llama.cpp run) | 29/29 |
 <!-- end models table -->
 
 **Logits:** forced or named `tool_choice`, strict tool schemas, `response_format`, `logprobs`, `min_p` and penalties
@@ -194,8 +195,8 @@ elastic pool, which the extension then uses).
 ## Quality
 
 Every declared model ran Gufo's API conformance checks (`conformance.py --logits`, 29 checks) on Strix Halo,
-all through `gufo model install` and the installed model, 24 on a local machine and 27 on AMD DevLab runners
-(`validation/results/models.md`, with Gufo's throughput per model). 44 pass all 29; the other 7 miss checks for the
+all through `gufo model install` and the installed model, 24 on a local machine and 28 on AMD DevLab runners
+(`validation/results/models.md`, with Gufo's throughput per model). 45 pass all 29; the other 7 miss checks for the
 reasons below.
 
 - gemma-3-1b, HyperCLOVAX-1.5B and Qwen2.5-VL-7B never call tools (their packages declare no tool-call format), so
@@ -214,6 +215,7 @@ Earlier evidence in `validation/results/`: images, the disk cache tier and the C
 
 | Version | Gufo | Notes |
 |---|---|---|
+| 0.3.7 | extension API >= 0.3.35 (gufo-org/gufo main from ec6d3d07) | 52 models: adds Inkling-2-Mini, with a tool grammar for its call syntax (`inkling2`; automatic tool use stays on the device) |
 | 0.3.6 | extension API >= 0.3.35 (gufo-org/gufo main from ec6d3d07) | 51 models: adds Qwen3.8-27B UD-Q4_K_XL, gemma-4 26B-A4B and 31B QAT, and Flint |
 | 0.3.5 | extension API >= 0.3.35 (gufo-org/gufo main from ec6d3d07) | Validation: all 47 models through `gufo model install` (`validation/results/models.md`) |
 | 0.3.4 | extension API >= 0.3.35 (gufo-org/gufo main from ec6d3d07) | Loom SDK release checks: a package built for another SDK is refused at load with what to fetch; `tools/models.py` pins each card's revision for the runtime's SDK (its `v<sdk>` tag, else the default branch) and `--check` verifies the pins |

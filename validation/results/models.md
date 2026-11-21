@@ -2,7 +2,7 @@
 
 Local: each model as a user runs it, `gufo model install ID`, then `gufo serve llm --model ID --sessions 4`. Strix Halo (gfx1151), Linux 7.0, BIOS performance mode; Gufo ec6d3d07 (Nix) in Docker, stock 8 MiB locked memory (weights preloaded); 2026-11-20.
 
-DevLab: AMD DevLab Dispatch Strix Halo runners, the same user flow: `gufo model install ID` with a Gufo bundle of this extension on Gufo main, then `conformance.py --logits` on the installed model (what `--model ID` resolves to); loom-fun/loom-skills#1335, runs 44841985936 (v0.3.2 on 029a156; 2026-11-20) and 44911502685 (the 4 models added in 0.3.6; 2026-11-21). The first 23 also passed the same checks earlier from loom-fetch packages (runs 44833137889, 44838012335).
+DevLab: AMD DevLab Dispatch Strix Halo runners, the same user flow: `gufo model install ID` with a Gufo bundle of this extension on Gufo main, then `conformance.py --logits` on the installed model (what `--model ID` resolves to); loom-fun/loom-skills#1335, runs 44841985936 (v0.3.2; 2026-11-20), 44911502685 (the 4 models added in 0.3.6) and 44944269567 (Inkling-2-Mini, 0.3.7; 2026-11-21). The first 23 also passed the same checks earlier from loom-fetch packages (runs 44833137889, 44838012335).
 
 Gufo checks: `conformance.py --logits` (29 checks). Throughput: `bench.py --reps 2` (greedy, thinking off;
 decode = one stream after a short prompt, prefill = time to first token of a ~10k-token document, 4 streams =
@@ -61,3 +61,4 @@ aggregate decode). Gufo / loom-serve: the same package, preset and flags under l
 | `gemma-4-26b-a4b-it-qat-loom` | DevLab | 29/29 |  |  |  |  |  |
 | `gemma-4-31b-it-qat-loom` | DevLab | 29/29 |  |  |  |  |  |
 | `flint-loom` | DevLab | 29/29 |  |  |  |  |  |
+| `inkling-2-mini-loom` | DevLab | 29/29 |  |  |  |  |  |
