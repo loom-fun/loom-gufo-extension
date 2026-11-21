@@ -54,8 +54,12 @@ def raw(repo, revision, path):
 
 
 def license_of(repo):
-    data = info(repo).get("cardData") or {}
+    meta = info(repo)
+    data = meta.get("cardData") or {}
     value = data.get("license")
+    if not value:  # a license the Hub knows only as a tag
+        tags = [t.split(":", 1)[1] for t in meta.get("tags", []) if t.startswith("license:")]
+        value = tags[0] if tags else None
     if value == "other" and data.get("license_name"):
         value = data["license_name"]
     return value if isinstance(value, str) else None

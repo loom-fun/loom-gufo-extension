@@ -34,7 +34,6 @@ aggregate decode). Gufo / loom-serve: the same package, preset and flags under l
 | `qwen3-8b-loom` | local | 29/29 | 55.9 | 1,428 | 147.6 |  |  |
 | `qwen3-vl-8b-instruct-loom` | local | 29/29 | 45.4 | 1,457 | 154.5 |  |  |
 | `ornith-1.0-9b-loom` | local | 29/29 | 41.0 | 1,739 | 141.4 |  |  |
-| `gemma-4-12b-it-loom` | DevLab | 29/29 |  |  |  |  |  |
 | `ornith-1.5-9b-loom` | DevLab | 29/29 |  |  |  |  |  |
 | `nemotron-3.5-bolt-e4b-loom` | DevLab | 29/29 |  |  |  |  |  |
 | `qwen3.5-9b-loom` | DevLab | 29/29 |  |  |  |  |  |
