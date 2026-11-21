@@ -26,7 +26,9 @@ inline constexpr std::string_view kApiVersion = "0.3.35";
 }  // namespace gufo::ext
 EOF
 CXX=${CXX:-g++}
-FLAGS="-std=c++20 -O1 -g -I$OUT -I$GUFO -I$GUFO/include -I$GUFO/src/core/json/include -I$here/../loom-embed"
+# Gufo's Rust crates (src/core/*/include) hold the C headers of the code they replaced.
+RUST_INCLUDES=$(for d in "$GUFO"/src/core/*/include; do printf -- ' -I%s' "$d"; done)
+FLAGS="-std=c++20 -O1 -g -I$OUT -I$GUFO -I$GUFO/include$RUST_INCLUDES -I$here/../loom-embed"
 objs=()
 for f in src/core/sampling.cpp src/core/sampling_logit_row.cpp src/core/json_constraint.cpp \
          src/core/json_schema_lexeme.cpp src/core/json_schema_regex.cpp src/ext/text.cpp src/core/crypto/sha256.cpp \

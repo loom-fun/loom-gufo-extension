@@ -243,10 +243,6 @@
    "c4": 141.39941567899044
   }
  },
- "gemma-4-12b-it-loom": {
-  "conformance": "29/29",
-  "failed": []
- },
  "ornith-1.5-9b-loom": {
   "conformance": "29/29",
   "failed": []
