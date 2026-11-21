@@ -1,5 +1,5 @@
 # loom-fun packages declared as Gufo models (tools/models.py writes them into extension.json).
-# One Hugging Face repository per line; each serves a text model on Strix Halo through this extension.
+# One Hugging Face repository per line (optionally followed by its Gufo model ID); each serves a text model on Strix Halo through this extension.
 loom-fun/unsloth-Qwen3-0.6B-loom
 loom-fun/bartowski-Qwen2.5-0.5B-Instruct-loom
 loom-fun/unsloth-Qwen3.5-0.8B-loom
@@ -47,3 +47,7 @@ loom-fun/InternScience-Sage-A1.5-loom
 loom-fun/unsloth-Qwen3.5-35B-A3B-loom
 loom-fun/bartowski-Ornith-1.5-35B-A3B-loom
 loom-fun/ggml-org-Muse-Glimmer-30B-loom
+loom-fun/unsloth-Qwen3.8-27B-UD-Q4_K_XL
+loom-fun/unsloth-gemma-4-26B-A4B-it-qat-loom gemma-4-26b-a4b-it-qat-loom
+loom-fun/unsloth-gemma-4-31B-it-qat-loom gemma-4-31b-it-qat-loom
+loom-fun/ggml-org-Flint-loom
