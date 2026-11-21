@@ -558,6 +558,12 @@ void TestDialects() {
        " to="},
   };
   for (const auto& c : cases) {
+    // Automatic tool use stays on the device only where a lazy grammar cannot
+    // tell a call from other output by its start.
+    const std::string format = c.format;
+    CHECK(NativeDialectOf(json::parse(c.chat)).auto_on_device ==
+              (format == "harmony" || format == "atem" || format == "inkling2"),
+          format + ": auto tool use on the device");
     fake::reset();
     fake::state().script = PeakScript;
     Fixture f(true, 2, c.chat);

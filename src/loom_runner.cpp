@@ -332,12 +332,9 @@ public:
     tokens.resize(count);
     context->opens_reasoning = OpensReasoningLocked(tokens);
     // Automatic tool use stays on the device where a lazy grammar cannot
-    // follow the model: Glimmer's call header (" to=NAME") starts like its
-    // answer header (" to=user"), and gpt-oss may write a harmony call with the
-    // recipient before the channel (the order its template renders history in)
-    // as well as after it; the package's own parser reads either.
+    // follow the model (NativeDialect::auto_on_device).
     const bool lazy_ambiguous =
-        (native_.atem || native_.call_format == "harmony") &&
+        native_.auto_on_device &&
         request.tool_choice == ext::ChatRequest::ToolChoice::kAuto;
     context->constraint_ok = model_->logits().enabled && reasoning_ok_ &&
                              (request.tools.empty() ||

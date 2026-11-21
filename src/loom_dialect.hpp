@@ -38,6 +38,10 @@ struct NativeDialect {
   // Glimmer's channel format: the reasoning markers above are the ones the
   // output carries after the generation prompt.
   bool atem{false};
+  // A lazy grammar cannot tell this format's calls from its other output
+  // where it starts, so automatic tool use stays on the device (the package
+  // parses the calls); required and named calls are still constrained.
+  bool auto_on_device{false};
   // The model reasons whatever the request says (chat.thinking "always"), so
   // its output always starts in reasoning, prompt-opened or not.
   bool always_reasons{false};
@@ -104,6 +108,9 @@ inline NativeDialect NativeDialectOf(const json::Value& chat) {
         .name_delimiters = " ",
     };
     dialect.after_reasoning = "<|start|>assistant";
+    // gpt-oss may also write the recipient before the channel (the order its
+    // template renders history in); the package's parser reads either.
+    dialect.auto_on_device = true;
     dialect.answer_channel = "<|channel|>final<|message|>";
   } else if (format == "json") {
     // Llama 3.x: {"name": "NAME", "parameters": {...}} (chat.call_arguments_key)
@@ -141,6 +148,9 @@ inline NativeDialect NativeDialectOf(const json::Value& chat) {
         .name_delimiters = "<\"",
         .values = {.whitespace = false},
     };
+    // Every Inkling message, text and thinking included, starts with
+    // <|message_model|>.
+    dialect.auto_on_device = true;
   } else if (format == "atem") {
     // Glimmer's channel format. After the generation prompt (<|start|>assistant)
     // a call is addressed to its function and written as an XML block that
@@ -167,6 +177,8 @@ inline NativeDialect NativeDialectOf(const json::Value& chat) {
             },
     };
     dialect.atem = true;
+    // The call header (" to=NAME") starts like the answer's (" to=user").
+    dialect.auto_on_device = true;
   }
   // none (no tool calls): no descriptor.
   dialect.always_reasons = chat.member_str("thinking") == "always";

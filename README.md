@@ -189,7 +189,7 @@ elastic pool, which the extension then uses).
   64 MiB. Below that (stock Ubuntu: 8 MiB, also Docker's default) the extension reads the weights into host memory at
   load instead, as `loom-serve --parameter_mode=preload` does, so loading takes about the weights' size in extra RAM.
   Raise the limit (`ulimit -l unlimited`, `LimitMEMLOCK=infinity`, Docker `--ulimit memlock=-1`) to stream them.
-- gpt-oss and Glimmer: automatic tool choice is not grammar-constrained (the package parses the calls); required and named are.
+- gpt-oss, Glimmer and Inkling 2: automatic tool choice is not grammar-constrained (the package parses the calls); required and named are.
 
 ## Quality
 
