@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "name": "loom",
-  "version": "0.3.6",
+  "version": "0.3.7",
   "api_version": ">= 0.3.35",
   "entry": "loom_register",
   "registration_target": "gufo_loom",
@@ -2403,6 +2403,47 @@
           "include": [
             "Flint-DFlash2-Q4_K_M.gguf"
           ]
+        }
+      ]
+    },
+    {
+      "id": "inkling-2-mini-loom",
+      "provider": "loom-text",
+      "license": "apache-2.0",
+      "description": "Inkling-2-Mini on AMD Loom (UD-Q4_K_XL GGUF, speculative decoding)",
+      "components": [
+        {
+          "role": "package",
+          "option": "--model",
+          "install": "required",
+          "source": {
+            "hf": "loom-fun/unsloth-Inkling-2-Mini-loom",
+            "revision": "277f099b5003b725e099d48caa1a2c0db1f9b650"
+          },
+          "exclude": [
+            "README.md",
+            "REPORT.md",
+            "info.json",
+            ".gitattributes",
+            "*.png",
+            "*.jpg",
+            "*.svg"
+          ],
+          "entry": "."
+        },
+        {
+          "role": "checkpoint",
+          "option": "--loom-checkpoint",
+          "install": "required",
+          "source": {
+            "hf": "unsloth/Inkling-2-Mini-GGUF",
+            "revision": "ea0c79b2ecd73669e774c8519b79bfabfddbc027"
+          },
+          "include": [
+            "Inkling-2-Mini-UD-Q4_K_XL.gguf",
+            "dspark-Inkling-2-Mini-Q8_0.gguf"
+          ],
+          "entry": "."
         }
       ]
     }

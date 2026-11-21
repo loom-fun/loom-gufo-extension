@@ -51,3 +51,4 @@ loom-fun/unsloth-Qwen3.8-27B-UD-Q4_K_XL
 loom-fun/unsloth-gemma-4-26B-A4B-it-qat-loom gemma-4-26b-a4b-it-qat-loom
 loom-fun/unsloth-gemma-4-31B-it-qat-loom gemma-4-31b-it-qat-loom
 loom-fun/ggml-org-Flint-loom
+loom-fun/unsloth-Inkling-2-Mini-loom
