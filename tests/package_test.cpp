@@ -209,6 +209,31 @@ void TestStaleAndLayouts() {
   fs::remove_all(shared);
 }
 
+void TestSdk() {
+  const auto root = TempDir();
+  Write(root / "model.json", kCard);
+  Write(root / "sub" / "model-Q4_K_M.gguf", "weights");
+  Write(root / "draft.gguf", "draft");
+  auto refused = [&](std::string_view runtime) {
+    try {
+      package::Resolve(root.string(), "chat", {}, {}, runtime);
+    } catch (const std::exception& error) {
+      return std::string(error.what()).find("built for Loom SDK") != std::string::npos;
+    }
+    return false;
+  };
+  CHECK(!refused("0.2.0"), "no llm_config.json: nothing to check");
+  Write(root / "llm_config.json", R"({"chat": {}})");
+  CHECK(package::PackageSdk(root) == "0.1.0", "no sdk field: a 0.1.0 package");
+  CHECK(refused("0.2.0"), "a 0.1.0 package on the 0.2.0 runtime is refused");
+  Write(root / "llm_config.json", R"({"sdk": {"hrx_loom": "0.2.0", "source": "pypi"}})");
+  CHECK(!refused("0.2.0") && !refused("0.2.1"), "same series serves");
+  CHECK(refused("0.3.0"), "a newer runtime refuses an older package");
+  CHECK(!refused(""), "no runtime version: nothing to check");
+  CHECK(package::SdkSeries("0.2.0") == "0.2" && package::SdkSeries("1.10.3") == "1.10", "series");
+  fs::remove_all(root);
+}
+
 void TestUnsafePaths() {
   CHECK(package::SafeRelative("parameter/a.gguf"), "plain path");
   CHECK(!package::SafeRelative("../a.gguf"), "parent");
@@ -244,6 +269,7 @@ int main() {
   TestOriginOptions();
   TestMissing();
   TestUnsafePaths();
+  TestSdk();
   TestStaleAndLayouts();
   fs::remove_all(tmp);
   if (failures) {

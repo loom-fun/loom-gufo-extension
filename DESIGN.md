@@ -110,7 +110,25 @@ served as published rather than as loom-fetch materializes it, which
   files are an error that names each one with its origin and says how to
   install it.
 
-`tests/package_test.cpp` covers both, without a GPU.
+**Loom SDK releases.** Loom's package format changes with its SDK releases.
+loom-fun moves each card's default branch to the newest release and tags the
+last revision for the previous one (`v0.1.0`, then `v0.2.0`, ...). The
+extension is built for one release: `nix/loom-runtime.nix` pins it, and the
+embed's `LOOM_TEXT_EMBED_HRX_LOOM` states it (the tests check they agree).
+
+- An extension release pins its models' exact revisions (`models.lock.json`),
+  so it keeps serving packages built for its SDK after the cards move on.
+  `tools/models.py` pins each card's `v<sdk>` tag when it has one, else its
+  default branch, and refuses a revision whose `llm_config.json` targets
+  another SDK; `--check` verifies the current pins.
+- At load, a package whose `llm_config.json` names another SDK series (none:
+  0.1.0) is refused with what to fetch instead, rather than failing inside
+  Loom.
+- A new SDK release means a new extension release: bump the runtime, rerun
+  `tools/models.py` (pins the cards' new default branches), lock, validate.
+  Users get it with `gufo extension update` and `gufo model update`.
+
+`tests/package_test.cpp` covers these, without a GPU.
 
 ## Logits
 

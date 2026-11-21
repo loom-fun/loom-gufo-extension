@@ -140,6 +140,47 @@ inline std::string ChoosePreset(const json::Value& card, const std::string& requ
                            "); pass --loom-preset");
 }
 
+// The Loom SDK release a package was built for: its llm_config.json's
+// "sdk": {"hrx_loom": "X.Y.Z"}, "0.1.0" for a package from before the field,
+// or empty when the package has no llm_config.json (nothing to check).
+inline std::string PackageSdk(const fs::path& root) {
+  std::error_code error;
+  const auto path = root / "llm_config.json";
+  if (!fs::is_regular_file(path, error))
+    return {};
+  try {
+    const auto config = json::parse(ReadText(path));
+    if (const auto* sdk = config.find("sdk"); sdk && sdk->is_object()) {
+      const auto version = sdk->member_str("hrx_loom");
+      if (!version.empty())
+        return version;
+    }
+  } catch (const std::exception&) {
+    return {};
+  }
+  return "0.1.0";
+}
+
+// "0.2" of "0.2.0": releases with the same major.minor share package formats.
+inline std::string_view SdkSeries(std::string_view version) {
+  const auto first = version.find('.');
+  const auto second = first == std::string_view::npos ? first : version.find('.', first + 1);
+  return version.substr(0, second);
+}
+
+// A package built for another Loom SDK release fails inside Loom in ways that
+// do not say why: refuse it here with what to fetch instead.
+inline void CheckSdk(const fs::path& root, std::string_view runtime) {
+  const auto built = PackageSdk(root);
+  if (built.empty() || runtime.empty() || SdkSeries(built) == SdkSeries(runtime))
+    return;
+  throw std::runtime_error(
+      "loom: this package is built for Loom SDK " + built + ", and this extension runs Loom SDK " +
+      std::string(runtime) + ". Install the model with `gufo model install` (it pins packages built for " +
+      std::string(runtime) + "), or fetch the package revision for it: loom-fun tags the last revision for each "
+      "earlier SDK (v" + std::string(SdkSeries(built)) + ".0, ...), and the default branch serves the newest.");
+}
+
 // A normalized relative path (no "..", ".", empty or absolute parts), as Loom
 // requires of card paths: links are made only inside the private directory.
 inline bool SafeRelative(std::string_view path) {
@@ -299,10 +340,11 @@ inline void RemoveStale(const fs::path& temp) {
 
 inline Resolved Resolve(const std::string& path, const std::string& requested_preset,
                         const std::map<std::string, fs::path>& origins,
-                        const Gpu& gpu) {
+                        const Gpu& gpu, std::string_view runtime_sdk = {}) {
   Resolved resolved;
   resolved.load_path = path;
   const fs::path root = fs::is_directory(path) ? fs::path(path) : fs::path(path).parent_path();
+  CheckSdk(root, runtime_sdk);
   const auto card = json::parse(ReadText(root / "model.json"));
   resolved.preset = ChoosePreset(card, requested_preset, gpu, &resolved.note);
   std::vector<std::pair<std::string, fs::path>> links;

@@ -43,11 +43,12 @@ public:
     std::ofstream(dir_ / "model.json")
         << R"({"schema_version":1,"programs":{},"services":{"chat":{"kind":"text"}},)"
            R"("variants":{"v":{"services":{"chat":{"config":{"llm.card":true,"llm.logits":false}}}}}})";
-    // The package's dialect (llm_config.json "chat"); Hermes JSON by default,
-    // none at all for "{}".
+    // The package's dialect (llm_config.json "chat", in a package built for
+    // this SDK); Hermes JSON by default, no llm_config.json at all for "{}".
     if (chat != "{}")
       std::ofstream(dir_ / "llm_config.json")
-          << R"({"chat":)" << (chat.empty() ? R"({"call_format":"hermes"})" : chat) << "}";
+          << R"({"sdk":{"hrx_loom":")" LOOM_TEXT_EMBED_HRX_LOOM R"("},"chat":)"
+          << (chat.empty() ? R"({"call_format":"hermes"})" : chat) << "}";
     ext::ParsedOptions options;
     if (!logits)
       options["--loom-logits"] = std::string("off");

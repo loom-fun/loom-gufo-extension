@@ -47,6 +47,14 @@ inline constexpr std::size_t kMarkerBytes = 16;
 inline constexpr std::size_t kHostCacheBytes = std::size_t{8} << 20;
 inline constexpr std::size_t kTextBuffer = 1 << 16;
 
+// The Loom SDK release of the linked library (a library built from an older
+// copy of this repository's loom-embed does not say: no check).
+#ifdef LOOM_TEXT_EMBED_HRX_LOOM
+inline constexpr std::string_view kRuntimeSdk = LOOM_TEXT_EMBED_HRX_LOOM;
+#else
+inline constexpr std::string_view kRuntimeSdk = {};
+#endif
+
 // ---------------------------------------------------------------- probe ---
 
 inline std::optional<fs::path> ManifestPath(std::string_view model_root) {
@@ -126,7 +134,7 @@ public:
     auto gpu = package::FirstGpu();
     if (package::NamesDevice(device))
       gpu = {.named_device = true};
-    package_ = package::Resolve(path, preset, origins, gpu);
+    package_ = package::Resolve(path, preset, origins, gpu, kRuntimeSdk);
     preset = package_.preset;
     if (!package_.note.empty())
       std::fprintf(stderr, "loom: %s\n", package_.note.c_str());
