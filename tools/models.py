@@ -139,7 +139,7 @@ def describe(card, files):
             quant = match.group(0).upper().replace("UD-", "UD-") if match else None
             break
     extras = []
-    if any(origin == "drafter" or Path(path).name.lower().startswith("mtp-") for origin, path in files):
+    if any(origin == "drafter" or Path(path).name.lower().startswith(("mtp-", "dspark-")) for origin, path in files):
         extras.append("speculative decoding")
     if any(origin == "vision" or "mmproj" in path.lower() for origin, path in files):
         extras.append("vision")

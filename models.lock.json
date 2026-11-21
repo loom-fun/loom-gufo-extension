@@ -5703,6 +5703,104 @@
           }
         ]
       }
+    },
+    "inkling-2-mini-loom": {
+      "package": {
+        "source": {
+          "hf": "loom-fun/unsloth-Inkling-2-Mini-loom",
+          "revision": "277f099b5003b725e099d48caa1a2c0db1f9b650"
+        },
+        "include": [],
+        "exclude": [
+          "README.md",
+          "REPORT.md",
+          "info.json",
+          ".gitattributes",
+          "*.png",
+          "*.jpg",
+          "*.svg"
+        ],
+        "files": [
+          {
+            "path": "head_weights.loom",
+            "size": 3098,
+            "sha256": "fac8f0142782c9b5c04227f00dfa49e0c3eb34a21270ff700501574330b61cd9"
+          },
+          {
+            "path": "llm_config.json",
+            "size": 4427,
+            "sha256": "1419cd637e106e0ecd95c17e22e28c3380a3e6264805ebd6ae0cf2c4fb0a1d8f"
+          },
+          {
+            "path": "model.json",
+            "size": 1659,
+            "sha256": "187788e26352385c578c0c368bd0db5878935fbbf6786a0a64c108af25e18949"
+          },
+          {
+            "path": "model.json.lock",
+            "size": 892,
+            "sha256": "79ed20d4ebcbb79a79228304bda0780e983d2fa6527f752a3c7614ff99fdf565"
+          },
+          {
+            "path": "program/control.loom",
+            "size": 223546,
+            "sha256": "7a1f20791de110168583e27292a355a124a8e69c2deb90f641835a52e27fcd43"
+          },
+          {
+            "path": "program/llm.loom",
+            "size": 5539325,
+            "sha256": "edab6e69aaac07145403241b752b35cc281eba745116d5e87f263872aeeddc41"
+          },
+          {
+            "path": "program/prepare.loom",
+            "size": 16155,
+            "sha256": "885e51c636ac37ff1c282469f23757a124bf021df4d810b2df12bd5cd24e5eb7"
+          },
+          {
+            "path": "program/service.loom",
+            "size": 26042,
+            "sha256": "5dcd083b26d98f39b3215f9f47b9acfaa08e62df406718cdb92aa0684323f7db"
+          },
+          {
+            "path": "program/storage.loom",
+            "size": 12748,
+            "sha256": "d1b75d6420b892c6b297ed3f73331faa349f0f0f4f514e7a450d8f9327ebc666"
+          },
+          {
+            "path": "tokenizer.json",
+            "size": 12242935,
+            "sha256": "a45fdc4e7e66a035de236d2694742fed5645327051caace5f8312013a879f9b1"
+          },
+          {
+            "path": "weights.loom",
+            "size": 121,
+            "sha256": "fb3c96e131283f9f78f45b2fff79bd3b2e86f292e012f1f37d752e15edafc916"
+          }
+        ]
+      },
+      "checkpoint": {
+        "source": {
+          "hf": "unsloth/Inkling-2-Mini-GGUF",
+          "revision": "ea0c79b2ecd73669e774c8519b79bfabfddbc027"
+        },
+        "include": [
+          "Inkling-2-Mini-UD-Q4_K_XL.gguf",
+          "dspark-Inkling-2-Mini-Q8_0.gguf"
+        ],
+        "exclude": [],
+        "files": [
+          {
+            "path": "Inkling-2-Mini-UD-Q4_K_XL.gguf",
+            "size": 17629759456,
+            "sha256": "e62d463c135ffe283df8d94b279a96ca145ac128b52ce854478613045bf4de15"
+          },
+          {
+            "path": "dspark-Inkling-2-Mini-Q8_0.gguf",
+            "size": 402278560,
+            "sha256": "2ec78510da837e8fc3be54a14757a0c5fbd2d8d9e85a0d92853fafdf674f3773"
+          }
+        ]
+      }
     }
   }
 }
