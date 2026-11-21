@@ -128,6 +128,19 @@ inline NativeDialect NativeDialectOf(const json::Value& chat) {
                    .string_close = "'",
                    .keyword_root = true},
     };
+  } else if (format == "inkling2") {
+    // Inkling 2: each call is its own model message that names the function,
+    // then names it again in compact JSON with its arguments under "args":
+    //   <|message_model|>NAME<|content_invoke_tool_json|>{"name":"NAME","args":{...}}<|end_message|>
+    dialect.tools = Syntax{
+        .open = "<|message_model|>",
+        .name_suffix = chat.member_str("call_marker", "<|content_invoke_tool_json|>"),
+        .repeat_prefix = "{\"name\":\"",
+        .repeat_suffix = "\",\"args\":",
+        .close = "}<|end_message|>",
+        .name_delimiters = "<\"",
+        .values = {.whitespace = false},
+    };
   } else if (format == "atem") {
     // Glimmer's channel format. After the generation prompt (<|start|>assistant)
     // a call is addressed to its function and written as an XML block that
