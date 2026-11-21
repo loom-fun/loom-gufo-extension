@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "name": "loom",
-  "version": "0.3.2",
+  "version": "0.3.3",
   "api_version": ">= 0.3.35",
   "entry": "loom_register",
   "registration_target": "gufo_loom",
@@ -147,7 +147,7 @@
           "install": "required",
           "source": {
             "hf": "loom-fun/unsloth-Qwen3-0.6B-loom",
-            "revision": "75002ca2d051237eb0c1d8816da7f282a7b2bce5"
+            "revision": "564d578f4e487c6fbabd84915439f873651b5953"
           },
           "exclude": [
             "README.md",
@@ -186,7 +186,7 @@
           "install": "required",
           "source": {
             "hf": "loom-fun/bartowski-Qwen2.5-0.5B-Instruct-loom",
-            "revision": "37e62481d5870112df2a67ea3095a4dff3b2b6ae"
+            "revision": "6fe5ac03a656c4e5d51ecb270c7d7bedc56c2a57"
           },
           "exclude": [
             "README.md",
@@ -225,7 +225,7 @@
           "install": "required",
           "source": {
             "hf": "loom-fun/unsloth-Qwen3.5-0.8B-loom",
-            "revision": "75e527c10a18080d4c649d3cf177c6faf219f512"
+            "revision": "9131414f6d7c0e37a890bb23fb7a1693e82b4db3"
           },
           "exclude": [
             "README.md",
@@ -266,7 +266,7 @@
           "install": "required",
           "source": {
             "hf": "loom-fun/ggml-org-gemma-3-1b-it-loom",
-            "revision": "ed8c5c344ed3b809ca4e67af597ef759f39b37af"
+            "revision": "ed544f633706e706da5098bd5f2fd3c1579921ac"
           },
           "exclude": [
             "README.md",
@@ -305,7 +305,7 @@
           "install": "required",
           "source": {
             "hf": "loom-fun/bartowski-Qwen2.5-1.5B-Instruct-loom",
-            "revision": "8c967d245aed0686b9b9d456fc5672a26a925811"
+            "revision": "a78f4fd5b9cda2a40ce321c2f60ea09228ca9950"
           },
           "exclude": [
             "README.md",
@@ -344,7 +344,7 @@
           "install": "required",
           "source": {
             "hf": "loom-fun/ggml-org-LFM3-Omni-2B-loom",
-            "revision": "b86c619620b2265400c729523daba5b31a5cff1b"
+            "revision": "82e3ff40dd639c936f2909111d73191b2d6d0da6"
           },
           "exclude": [
             "README.md",
@@ -383,7 +383,7 @@
           "install": "required",
           "source": {
             "hf": "loom-fun/bartowski-LFM3-1.7B-loom",
-            "revision": "4b71514ccc38b46f9527bcd86bbe97218ef91d0c"
+            "revision": "b2554fcb467b22105aff94eb4b63e2017bc76e4c"
           },
           "exclude": [
             "README.md",
@@ -422,7 +422,7 @@
           "install": "required",
           "source": {
             "hf": "loom-fun/rippertnt-HyperCLOVAX-SEED-Text-Instruct-1.5B-loom",
-            "revision": "7cadfe9e8f9e44e781bbe8eceaacfd161a3a3079"
+            "revision": "0c8e8831544e6625431a8177873fa531e75d0cc0"
           },
           "exclude": [
             "README.md",
@@ -461,7 +461,7 @@
           "install": "required",
           "source": {
             "hf": "loom-fun/ggml-org-Qwen3-1.7B-loom",
-            "revision": "933c79a6b45eeb1c1d512a4efac9b7749bf3a607"
+            "revision": "e1d356b458ad21cb476546c6454abbb4f32a3bf2"
           },
           "exclude": [
             "README.md",
@@ -500,7 +500,7 @@
           "install": "required",
           "source": {
             "hf": "loom-fun/unsloth-Qwen3.5-2B-loom",
-            "revision": "250eb2682ee3c6b34db9940046c4c23dff5bebb7"
+            "revision": "0841f9d4e1058fa2efdd8dcc663504c255aae1a6"
           },
           "exclude": [
             "README.md",
@@ -541,7 +541,7 @@
           "install": "required",
           "source": {
             "hf": "loom-fun/unsloth-Llama-3.2-3B-Instruct-loom",
-            "revision": "bffba745348919620d5a5e62ee7049d289f0c194"
+            "revision": "c6defa4cd5a8764b2cd8d4c14cb81ca0f118a76c"
           },
           "exclude": [
             "README.md",
@@ -580,7 +580,7 @@
           "install": "required",
           "source": {
             "hf": "loom-fun/unsloth-Qwen3-4B-Instruct-2507-loom",
-            "revision": "e4a30f5d40b724a316d425d5ab85833eb35becd7"
+            "revision": "d0df214dfcbf73e905ad7930498e110bb5525e3d"
           },
           "exclude": [
             "README.md",
@@ -619,7 +619,7 @@
           "install": "required",
           "source": {
             "hf": "loom-fun/XHToken-Spark-X2.5-4B-loom",
-            "revision": "a1eecd251554d6d3d49122ab0193bd7ca74f8b67"
+            "revision": "b2e87e163ac1e1db1912ea4aaed57bc3816b78a5"
           },
           "exclude": [
             "README.md",
@@ -658,7 +658,7 @@
           "install": "required",
           "source": {
             "hf": "loom-fun/bartowski-Spark-X2.6-4B-loom",
-            "revision": "aba61ac7d2abf07a57b611cdc92d92f9b1500675"
+            "revision": "d38e0b2578353ca0a7dc999b3c8ee44944ad1753"
           },
           "exclude": [
             "README.md",
@@ -697,7 +697,7 @@
           "install": "required",
           "source": {
             "hf": "loom-fun/ggml-org-Qwen3-4B-loom",
-            "revision": "2542be4420a49f9ef8055a61475b544082f18b3c"
+            "revision": "b0944ed9f7f284e15f31aa4a9d14473c193707a8"
           },
           "exclude": [
             "README.md",
@@ -748,7 +748,7 @@
           "install": "required",
           "source": {
             "hf": "loom-fun/unsloth-Qwen3-VL-4B-Instruct-loom",
-            "revision": "63304b5450989724a8054fa720c613fc59cf7edb"
+            "revision": "c9e8f9868c0be8bbef11ee5f7bebf35f2feb419b"
           },
           "exclude": [
             "README.md",
@@ -789,7 +789,7 @@
           "install": "required",
           "source": {
             "hf": "loom-fun/unsloth-Qwen3.5-4B-loom",
-            "revision": "f9b3c95c4c98d8dc6c14aa4aaf4daa9e656e6474"
+            "revision": "7e1a042bfa355360b8d17ee6c51c38410af8d0b6"
           },
           "exclude": [
             "README.md",
@@ -842,7 +842,7 @@
           "install": "required",
           "source": {
             "hf": "loom-fun/unsloth-gemma-4-E2B-it-loom",
-            "revision": "27b0fd1072f4cfe4d520ec40e250a52c9974c128"
+            "revision": "3503abcf7cfff7bc58bd819ea32ccab8c18c075d"
           },
           "exclude": [
             "README.md",
@@ -895,7 +895,7 @@
           "install": "required",
           "source": {
             "hf": "loom-fun/bartowski-Qwen2.5-7B-Instruct-loom",
-            "revision": "7021f53684a0c33af502cfd83e46483675bfe249"
+            "revision": "7a755e3f50d67b6bf97487135d025c19cce0f14c"
           },
           "exclude": [
             "README.md",
@@ -934,7 +934,7 @@
           "install": "required",
           "source": {
             "hf": "loom-fun/ggml-org-Qwen2.5-VL-7B-Instruct-loom",
-            "revision": "07325c1a68db9a73d9b7728e41136c6e9c591852"
+            "revision": "2611dac7db74f0042ce3fc06dd821ca613efe3fa"
           },
           "exclude": [
             "README.md",
@@ -975,7 +975,7 @@
           "install": "required",
           "source": {
             "hf": "loom-fun/unsloth-gemma-4-E4B-it-loom",
-            "revision": "c8853a434243898ba0a96677c468b45d687daa7c"
+            "revision": "e53717d9759ed9faa3454a65818c8401b5ff9f14"
           },
           "exclude": [
             "README.md",
@@ -1028,7 +1028,7 @@
           "install": "required",
           "source": {
             "hf": "loom-fun/unsloth-Qwen3-8B-loom",
-            "revision": "b5978b011050f058e7d71ba6c8e29e8e998d4874"
+            "revision": "35d393f359b50ec874e5f2d635bcf03fb48d080f"
           },
           "exclude": [
             "README.md",
@@ -1079,7 +1079,7 @@
           "install": "required",
           "source": {
             "hf": "loom-fun/unsloth-Qwen3-VL-8B-Instruct-loom",
-            "revision": "d8c4358f5a4657f37fe6f3604a0d0943680d3932"
+            "revision": "4c126a53d2beabbcd03700071be10ac811b6778a"
           },
           "exclude": [
             "README.md",
@@ -1120,7 +1120,7 @@
           "install": "required",
           "source": {
             "hf": "loom-fun/unsloth-Ornith-1.0-9B-loom",
-            "revision": "5474e994c0d4292327d7b2bfcd020c16c353c54a"
+            "revision": "dff6b66ed20512c86ec2f847bfe78fc6b5589149"
           },
           "exclude": [
             "README.md",
@@ -1214,7 +1214,7 @@
           "install": "required",
           "source": {
             "hf": "loom-fun/nvidia-NVIDIA-Nemotron-3.5-Bolt-E4B-4GB-loom",
-            "revision": "e86e987a599bab4816bc616cb0bbecac8a702b5f"
+            "revision": "3f36ed722f6c8bdb51d90526bc05e03a05f24dbf"
           },
           "exclude": [
             "README.md",
@@ -1277,7 +1277,7 @@
           "install": "required",
           "source": {
             "hf": "loom-fun/unsloth-Qwen3.5-9B-loom",
-            "revision": "153a3419302c1fac730cbfb3791c39c0523318c3"
+            "revision": "3bfcc8acc5988ecd195e68ea26260984bdddc355"
           },
           "exclude": [
             "README.md",
@@ -1330,7 +1330,7 @@
           "install": "required",
           "source": {
             "hf": "loom-fun/bartowski-Mellum2.1-12B-A2.5B-Thinking-loom",
-            "revision": "490675869ffbcc63b4c20e1dd5a9638a2bd3e090"
+            "revision": "5d172ab9262e8f7f64f14541d43b876f150132fe"
           },
           "exclude": [
             "README.md",
@@ -1369,7 +1369,7 @@
           "install": "required",
           "source": {
             "hf": "loom-fun/ggml-org-Qwen3-14B-loom",
-            "revision": "0fb86fef4ee8a2770abf35de5ce400914ea28af8"
+            "revision": "71bad2d9362daa394f2ed58ae5fb97628a139021"
           },
           "exclude": [
             "README.md",
@@ -1408,7 +1408,7 @@
           "install": "required",
           "source": {
             "hf": "loom-fun/unsloth-gpt-oss-20b-loom",
-            "revision": "2e02da6038dfced617e53473cbc41a449b4eb095"
+            "revision": "caf72ae4ed037eeaeb9d818b7d3e358ba464c16a"
           },
           "exclude": [
             "README.md",
@@ -1447,7 +1447,7 @@
           "install": "required",
           "source": {
             "hf": "loom-fun/ggml-org-LFM2.5-24B-A2B-loom",
-            "revision": "92d512236bc9cf0b35f408f6f189854889bb822b"
+            "revision": "5dc159ccab5c1f446f7f5454ff5a94d9f78ac280"
           },
           "exclude": [
             "README.md",
@@ -1486,7 +1486,7 @@
           "install": "required",
           "source": {
             "hf": "loom-fun/lmstudio-community-gemma-4-26B-A4B-it-loom",
-            "revision": "49f90bc8d93ecf98aa39c3ea28e6e3f10d7ca6f0"
+            "revision": "eb2bd1117e4a1de4d949b39fb6ac217e7ef35e6a"
           },
           "exclude": [
             "README.md",
@@ -1537,7 +1537,7 @@
           "install": "required",
           "source": {
             "hf": "loom-fun/ggml-org-Qwen3-Coder-30B-A3B-Instruct-loom",
-            "revision": "421a4d77efe943c6e94265110a75343d03ac52ac"
+            "revision": "90f4d2874d066ab7ad0c16daab9a383fa55f47a5"
           },
           "exclude": [
             "README.md",
@@ -1588,7 +1588,7 @@
           "install": "required",
           "source": {
             "hf": "loom-fun/bartowski-Qwen3.8-27B-loom",
-            "revision": "84edae805a375195bc411169350fe36a340b570d"
+            "revision": "a73a11eba342bde5e2ab489b2687cf731b9c7128"
           },
           "exclude": [
             "README.md",
@@ -1629,7 +1629,7 @@
           "install": "required",
           "source": {
             "hf": "loom-fun/unsloth-Qwen3-30B-A3B-Instruct-2507-loom",
-            "revision": "8f8a9fe349a03578c636b5f278e085dc22933662"
+            "revision": "c6598438289b2cbb1543e73e90b749136c888797"
           },
           "exclude": [
             "README.md",
@@ -1668,7 +1668,7 @@
           "install": "required",
           "source": {
             "hf": "loom-fun/unsloth-gemma-4-31B-it-loom",
-            "revision": "c81ac66081dbaadc90d4c69fc01362911944cffb"
+            "revision": "568071f2fbee4b39c45d10ed9ea2453d5eec7137"
           },
           "exclude": [
             "README.md",
@@ -1719,7 +1719,7 @@
           "install": "required",
           "source": {
             "hf": "loom-fun/bartowski-Qwen2.5-32B-Instruct-loom",
-            "revision": "06c2617b856f69856fedb73afa666501131cc7f7"
+            "revision": "07da8bface8f684e61d007ed15295e861c734a33"
           },
           "exclude": [
             "README.md",
@@ -1758,7 +1758,7 @@
           "install": "required",
           "source": {
             "hf": "loom-fun/ggml-org-Laguna-XS-2.1-loom",
-            "revision": "e9da39e41e37ba7dae7a4ff8e9c9390525e417a4"
+            "revision": "640cfee4a72a1336888459ba83948d5d74ab9f44"
           },
           "exclude": [
             "README.md",
@@ -1809,7 +1809,7 @@
           "install": "required",
           "source": {
             "hf": "loom-fun/bartowski-Nanbeige4.3-33B-loom",
-            "revision": "fae57c6be7d8ce52ff9e9772d85261a494ab9007"
+            "revision": "bfe6f26ea510f721ba5751dc5115e8fca18ef66b"
           },
           "exclude": [
             "README.md",
@@ -1848,7 +1848,7 @@
           "install": "required",
           "source": {
             "hf": "loom-fun/ggml-org-Qwen3.6-27B-loom",
-            "revision": "d80dd8fd490545112ce6df279f3bd5c3a710f850"
+            "revision": "f86d908dd9e7caaf8312c4f753a600c3dfdc6ad8"
           },
           "exclude": [
             "README.md",
@@ -1901,7 +1901,7 @@
           "install": "required",
           "source": {
             "hf": "loom-fun/ggml-org-Qwen3.6-35B-A3B-loom",
-            "revision": "4528edb33e917b12505566520807d00f96ed9a93"
+            "revision": "9a06cc9ba5ca93e2de3a5fa40b2ad4e415d191fe"
           },
           "exclude": [
             "README.md",
@@ -1995,7 +1995,7 @@
           "install": "required",
           "source": {
             "hf": "loom-fun/bartowski-MiniCPM-V-4.7-35B-A3B-loom",
-            "revision": "6f2d12e63a97fbfff5a0e3d995047124cc0282b4"
+            "revision": "bb64688865697edb8b1f1329dc9bf1c32d520e71"
           },
           "exclude": [
             "README.md",
@@ -2034,7 +2034,7 @@
           "install": "required",
           "source": {
             "hf": "loom-fun/InternScience-Sage-A1.5-loom",
-            "revision": "1b6d67aa1045486fd7b96b0ee060f0072cae958c"
+            "revision": "bfa32772063c03a549b3452520d3110e0d978f2f"
           },
           "exclude": [
             "README.md",
@@ -2075,7 +2075,7 @@
           "install": "required",
           "source": {
             "hf": "loom-fun/unsloth-Qwen3.5-35B-A3B-loom",
-            "revision": "82d866f38178263f986e859dfe7df4e4eaf9ee7d"
+            "revision": "89e9db91429a851ccf55e5f31f3c81d1c3b7bea4"
           },
           "exclude": [
             "README.md",
@@ -2128,7 +2128,7 @@
           "install": "required",
           "source": {
             "hf": "loom-fun/bartowski-Ornith-1.5-35B-A3B-loom",
-            "revision": "491e4f8596d0601424655796a31a376ebf6bed64"
+            "revision": "a04f7adb325c45a30c8c9a5196bc4bac3e98fb9e"
           },
           "exclude": [
             "README.md",
@@ -2181,7 +2181,7 @@
           "install": "required",
           "source": {
             "hf": "loom-fun/ggml-org-Muse-Glimmer-30B-loom",
-            "revision": "34f70e5fd05ce7204e331618318be936dcabb2b2"
+            "revision": "40344e99e4b4d632b89c45278e5d1ffc46023cfb"
           },
           "exclude": [
             "README.md",
