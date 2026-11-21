@@ -210,6 +210,7 @@ Earlier evidence in `validation/results/`: images, the disk cache tier and the C
 
 | Version | Gufo | Notes |
 |---|---|---|
+| 0.3.4 | extension API >= 0.3.35 (gufo-org/gufo main from ec6d3d07) | Loom SDK release checks: a package built for another SDK is refused at load with what to fetch; `tools/models.py` pins each card's revision for the runtime's SDK (its `v<sdk>` tag, else the default branch) and `--check` verifies the pins |
 | 0.3.3 | extension API >= 0.3.35 (gufo-org/gufo main from ec6d3d07) | Every package pinned at its MIT-licensed card revision (the package files are unchanged) |
 | 0.3.2 | extension API >= 0.3.35 (gufo-org/gufo main from ec6d3d07) | 47 models: gemma-4-12B-it is left out until its drafter (`Anbeeld/gemma4-12B-it-DFlash-GGUF`) declares a license; licenses the Hub knows as tags are read; `tests/build_test.sh` builds with Gufo main's Rust crates (tested on 029a156) |
 | 0.3.1 | extension API >= 0.3.35 (gufo-org/gufo main from ec6d3d07) | Every model's package pinned at the revision that declares its license (the package files are unchanged) |
@@ -225,6 +226,9 @@ Earlier evidence in `validation/results/`: images, the disk cache tier and the C
   and its origins into `extension.json`), `python3 <gufo>/tools/models/lock.py .` (`models.lock.json`) and
   `python3 tools/models_table.py --readme` (the table above). Validate each with `validation/conformance.py --logits` on
   `gufo serve llm --model <ID>`; `validation/models_report.py` writes `validation/results/models.md`.
+- A new Loom SDK release (`DESIGN.md`, Loom SDK releases): bump `nix/loom-runtime.nix` and
+  `LOOM_TEXT_EMBED_HRX_LOOM`, rerun `tools/models.py` (it pins each card's revision for that SDK and refuses others;
+  `--check` verifies existing pins), lock, validate and release.
 - hrx-system pin: after changing it in `nix/loom-runtime.nix`, regenerate its downloads with
   `python3 nix/hrx-deps.py generate <hrx-system checkout> nix/hrx-deps.nix`.
 - `nix flake lock --update-input gufo` moves the flake to a newer Gufo.

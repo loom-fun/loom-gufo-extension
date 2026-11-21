@@ -25,6 +25,10 @@ inline constexpr unsigned kApiMajor = 0, kApiMinor = 3, kApiRevision = 35;
 inline constexpr std::string_view kApiVersion = "0.3.35";
 }  // namespace gufo::ext
 EOF
+# The embed's SDK release (its header) is the one nix/loom-runtime.nix builds it from.
+header_sdk=$(sed -n 's/^#define LOOM_TEXT_EMBED_HRX_LOOM "\(.*\)"/\1/p' "$here/../loom-embed/loom_text_embed.h")
+nix_sdk=$(sed -n 's/^  version = "\(.*\)";/\1/p' "$here/../nix/loom-runtime.nix")
+[ -n "$header_sdk" ] && [ "$header_sdk" = "$nix_sdk" ] || { echo "LOOM_TEXT_EMBED_HRX_LOOM ($header_sdk) != nix/loom-runtime.nix version ($nix_sdk)"; exit 1; }
 CXX=${CXX:-g++}
 # Gufo's Rust crates (src/core/*/include) hold the C headers of the code they replaced.
 RUST_INCLUDES=$(for d in "$GUFO"/src/core/*/include; do printf -- ' -I%s' "$d"; done)

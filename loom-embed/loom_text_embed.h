@@ -22,6 +22,10 @@ extern "C" {
 #endif
 
 #define LOOM_TEXT_EMBED_ABI_VERSION 2
+// The Loom SDK release (hrx-loom, ROCm/hrx-system) this library is built from:
+// packages must be built for it (their llm_config.json "sdk": {"hrx_loom": ...}).
+// nix/loom-runtime.nix pins the same release (tests/build_test.sh checks).
+#define LOOM_TEXT_EMBED_HRX_LOOM "0.2.0"
 
 typedef struct loom_text_embed_t loom_text_embed_t;
 typedef struct loom_text_embed_request_t loom_text_embed_request_t;

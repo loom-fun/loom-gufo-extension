@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
 """Declares the loom-fun packages in tools/models.txt as Gufo models.
 
-For each package it pins the repository's current revision and reads its
+For each package it pins the revision built for the Loom SDK this extension
+runs (nix/loom-runtime.nix): the card's `v<sdk>` tag when it has one (loom-fun
+tags the last revision for an SDK once the default branch moves to a newer
+one), else the default branch; the revision's llm_config.json must say it is
+built for that SDK. Then it reads its
 model.json: the package files become the component that fills --model (the
 model directory), and every origin the card's parameter files come from
 (checkpoint, drafter, vision) becomes a component with those files at their
@@ -12,6 +16,7 @@ directory to pin each file's size and SHA-256 in models.lock.json.
     python3 tools/models.py                     # needs network (Hugging Face)
     python3 /path/to/gufo/tools/models/lock.py .
     python3 tools/models.py --licenses          # refresh only the license fields
+    python3 tools/models.py --check             # every pinned package is built for the runtime's SDK
 
 Set HF_TOKEN for higher rate limits; HF_ENDPOINT selects a mirror.
 """
@@ -65,6 +70,40 @@ def license_of(repo):
     return value if isinstance(value, str) else None
 
 
+def runtime_sdk():
+    """The hrx-loom release nix/loom-runtime.nix builds (the embed's LOOM_TEXT_EMBED_HRX_LOOM)."""
+    match = re.search(r'^  version = "([^"]+)";', (ROOT / "nix" / "loom-runtime.nix").read_text(), re.M)
+    if not match:
+        raise SystemExit("nix/loom-runtime.nix: no version")
+    return match.group(1)
+
+
+def series(version):
+    return ".".join(version.split(".")[:2])
+
+
+def package_sdk(repo, revision):
+    """The SDK release a package revision is built for (llm_config.json "sdk"; none: 0.1.0)."""
+    config = json.loads(raw(repo, revision, "llm_config.json"))
+    return (config.get("sdk") or {}).get("hrx_loom") or "0.1.0"
+
+
+def sdk_revision(repo, sdk):
+    """The package revision for `sdk`: its v<sdk> tag, else the default branch's head."""
+    refs = json.loads(get(f"{endpoint()}/api/models/{repo}/refs"))
+    for tag in refs.get("tags", []):
+        if tag.get("name") == f"v{sdk}":
+            return tag["targetCommit"]
+    return info(repo)["sha"]
+
+
+def check_sdk(repo, revision, sdk):
+    built = package_sdk(repo, revision)
+    if series(built) != series(sdk):
+        raise SystemExit(f"{repo}@{revision[:8]} is built for Loom SDK {built}, the runtime is {sdk}: "
+                         f"it has no v{sdk} tag and its default branch targets another SDK")
+
+
 def license_text(licenses):
     """The checkpoint's license first, then any other origin's that differs."""
     return "; ".join(dict.fromkeys(licenses)) or "no license stated"
@@ -107,8 +146,9 @@ def describe(card, files):
     return text + (", " + ", ".join(extras) if extras else "") + ")"
 
 
-def declare(repo):
-    revision = info(repo)["sha"]
+def declare(repo, sdk):
+    revision = sdk_revision(repo, sdk)
+    check_sdk(repo, revision, sdk)
     card = json.loads(raw(repo, revision, "model.json"))
     files = parameter_files(card)
     origins = card.get("origins", {})
@@ -166,14 +206,27 @@ def relicense():
     path.write_text(json.dumps(manifest, indent=2) + "\n")
 
 
+def check():
+    """Every pinned package is built for the runtime's SDK release."""
+    sdk = runtime_sdk()
+    manifest = json.loads((ROOT / "extension.json").read_text())
+    for model in manifest["models"]:
+        source = model["components"][0]["source"]
+        check_sdk(source["hf"], source["revision"], sdk)
+    print(f"{len(manifest['models'])} packages built for Loom SDK {sdk}", file=sys.stderr)
+
+
 def main():
     if "--licenses" in sys.argv:
         return relicense()
+    if "--check" in sys.argv:
+        return check()
+    sdk = runtime_sdk()
     repos = [line.strip() for line in (ROOT / "tools" / "models.txt").read_text().splitlines()
              if line.strip() and not line.startswith("#")]
     models = []
     for repo in repos:
-        model = declare(repo)
+        model = declare(repo, sdk)
         if any(other["id"] == model["id"] for other in models):
             raise SystemExit(f"{repo}: model id {model['id']} is taken")
         models.append(model)
