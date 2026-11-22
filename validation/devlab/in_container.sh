@@ -12,8 +12,13 @@ extra-substituters = https://gufo.cachix.org
 extra-trusted-public-keys = gufo.cachix.org-1:rfZe3n4lHINgyoACKzs5EthIZmBNvEyCCtufUpth0PE=
 EOF
 git config --global --add safe.directory '*'
-RT=$(nix build -L --impure --no-link --print-out-paths --expr \
-  "import /ext/nix/runtime.nix { gufo = builtins.getFlake \"path:/src/gufo\"; }")
+# A Gufo that has Loom built in (src/models/loom, gufo-org/gufo#1315) brings its own runtime and extension: test that one.
+if [ -d /src/gufo/src/models/loom ]; then
+  RT=$(nix build -L --no-link --print-out-paths "path:/src/gufo#loom-runtime"); EXT_DIRS=""
+else
+  RT=$(nix build -L --impure --no-link --print-out-paths --expr \
+    "import /ext/nix/runtime.nix { gufo = builtins.getFlake \"path:/src/gufo\"; }"); EXT_DIRS="-DGUFO_EXTENSION_DIRS=/ext"
+fi
 echo "loom-runtime: $RT"
 # gufo's configure needs the NPU runtime (XRT)
 XRT=$(nix build -L --no-link --print-out-paths /src/gufo#xrt-amdxdna 2>/dev/null || nix build -L --no-link --print-out-paths "path:/src/gufo#xrt-amdxdna")
@@ -27,7 +32,7 @@ nix-shell -E "$GUFO_SHELL" --run "
 set -eu
 export PKG_CONFIG_PATH_FOR_TARGET=$RT/lib/pkgconfig:\${PKG_CONFIG_PATH_FOR_TARGET:-} PKG_CONFIG_PATH=$RT/lib/pkgconfig:\${PKG_CONFIG_PATH:-}   # the nix pkg-config wrapper reads either spelling
 cmake /src/gufo -B /build/gufo -GNinja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF -DCMAKE_HIP_COMPILER=\$HIP_CLANG \
-  -DXRT_DIR=$XRT/opt/xilinx/xrt/share/cmake/XRT -DGUFO_EXTENSIONS=loom -DGUFO_EXTENSION_DIRS=/ext
+  -DXRT_DIR=$XRT/opt/xilinx/xrt/share/cmake/XRT -DGUFO_EXTENSIONS=loom $EXT_DIRS
 cmake --build /build/gufo --target gufo --parallel 24
 dest=/out/$NAME; mkdir -p \$dest/bin \$dest/lib \$dest/validation
 cp /build/gufo/gufo \$dest/bin/gufo.real
