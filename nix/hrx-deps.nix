@@ -137,12 +137,12 @@
   rec {
     id = "cxx";
     urls = [
-      "https://github.com/benvanik/cplusplus/archive/2e7390a794a6ceb9681870443c28f73bd666c8db.tar.gz"
+      "https://github.com/benvanik/cplusplus/archive/f7148eebbb18079babd42decb1cd9936b0370b2d.tar.gz"
     ];
     file = fetchurl {
-      name = "2e7390a794a6ceb9681870443c28f73bd666c8db.tar.gz";
+      name = "f7148eebbb18079babd42decb1cd9936b0370b2d.tar.gz";
       inherit urls;
-      sha256 = "a24604bbd2d11a0cc9546842daf3455a252e502f334f7b25db1186450a01f2cc";
+      sha256 = "cbde54d09095806149b18a0af4ebd54ac52b8e4dbc500aa858f056025bca458a";
     };
   }
   rec {

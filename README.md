@@ -97,7 +97,7 @@ To serve from it, add `--device /dev/kfd --device /dev/dri --security-opt seccom
 drafter or vision projector where the package uses one), pinned by revision, size and SHA-256 in `models.lock.json`,
 and reuses files already in the Hugging Face cache. The extension finds those files in the model directory, so
 `--model <ID>` is all `gufo serve`, `prompt`, `chat` and `bench` need. A package fetched with `loom-fetch
-huggingface:loom-fun/<repo>:<preset> --output=<dir>` (`pipx install 'hrx-loom[hf]==0.2.0'`) works too: `--model <dir>`.
+huggingface:loom-fun/<repo>:<preset> --output=<dir>` (`pipx install 'hrx-loom[hf]==0.3.0'`) works too: `--model <dir>`.
 
 The extension bundles no weights. They keep their upstream license (Apache 2.0 for Qwen, the Gemma terms, the Llama 3.2
 Community License, LFM 1.0, ...), which each model's `license` (`gufo model list --json`) names, with a drafter's

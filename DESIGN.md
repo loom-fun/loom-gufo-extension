@@ -47,7 +47,7 @@ directory goes to the provider whose existing `probe` claims it
 `inference_backend.cpp`. `prompt`, `chat` and `bench` take it through
 `runner_cli.cpp`, which runs the server's backend in-process. Packaging is
 this repository's `nix/runtime.nix`, a Nix package that builds hrx-system
-v0.2.0 (the release loom-fun targets) with the embedding library, with the
+v0.3.0 with the embedding library, with the
 nixpkgs Gufo pins; `withTools = true` adds loom-serve and loom-fetch for
 side-by-side comparisons.
 

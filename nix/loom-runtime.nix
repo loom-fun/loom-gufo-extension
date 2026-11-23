@@ -2,7 +2,7 @@
 # layer (the kernels and programs of a Loom package, without loom-serve's
 # scheduler, caches or HTTP) behind a small C API, `libloom_text_embed.so`,
 # plus loom-serve for comparison. Built from the hrx-system release that
-# loom-fun packages target (hrx-loom 0.2.0).
+# loom-fun packages target (hrx-loom 0.3.0).
 {
   lib,
   fetchFromGitHub,
@@ -22,15 +22,15 @@
 }:
 
 let
-  # hrx-system v0.2.0, the release of hrx-loom 0.2.0.
-  version = "0.2.0";
-  revision = "0cd370f2baaa0cfef47cc23007f1a109906f8a52";
+  # hrx-system v0.3.0, the release of hrx-loom 0.3.0.
+  version = "0.3.0";
+  revision = "e2c41a720363911c04606ce0f4417e2d55630352";
 
   src = fetchFromGitHub {
     owner = "ROCm";
     repo = "hrx-system";
     rev = revision;
-    hash = "sha256-t/R1Qq00lpeS/elqLIltGJgHstNsWdgQWmpBMS3axkw=";
+    hash = "sha256-x2eu2g3QopK3OOX4SmeiTGgUhRE4llkC+HvyMny7fQc=";
   };
 
   # Every download pinned in MODULE.cmake.lock and Loom's ISA XML descriptor, one
@@ -68,7 +68,7 @@ clangStdenv.mkDerivation {
     python3
   ];
 
-  # Loom 0.2.0 drives AMD GPUs through its own native driver (libamdf): no ROCm
+  # Loom 0.3.0 drives AMD GPUs through its own native driver (libamdf): no ROCm
   # runtime or device toolchain is involved. The library is defined by
   # loom_text_embed.cmake, which HRX's CMake includes once its targets exist.
   cmakeFlags = [
