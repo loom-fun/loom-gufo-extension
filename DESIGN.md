@@ -119,11 +119,11 @@ embed's `LOOM_TEXT_EMBED_HRX_LOOM` states it (the tests check they agree).
 - An extension release pins its models' exact revisions (`models.lock.json`),
   so it keeps serving packages built for its SDK after the cards move on.
   `tools/models.py` pins each card's `v<sdk>` tag when it has one, else its
-  default branch, and refuses a revision whose `llm_config.json` targets
-  another SDK; `--check` verifies the current pins.
-- At load, a package whose `llm_config.json` names another SDK series (none:
-  0.1.0) is refused with what to fetch instead, rather than failing inside
-  Loom.
+  default branch, then checks the SDK named in `llm_config.json`.
+  `--check` verifies the current pins.
+- The loader and model lock checker accept packages from the runtime SDK
+  series. Loom 0.3 also accepts published Loom 0.2 packages through
+  controller ABI 1. A missing SDK pin implies 0.1.0.
 - A new SDK release means a new extension release: bump the runtime, rerun
   `tools/models.py` (pins the cards' new default branches), lock, validate.
   Users get it with `gufo extension update` and `gufo model update`.

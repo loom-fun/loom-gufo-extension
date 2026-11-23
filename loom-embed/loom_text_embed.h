@@ -22,8 +22,8 @@ extern "C" {
 #endif
 
 #define LOOM_TEXT_EMBED_ABI_VERSION 2
-// The Loom SDK release (hrx-loom, ROCm/hrx-system) this library is built from:
-// packages must be built for it (their llm_config.json "sdk": {"hrx_loom": ...}).
+// The Loom SDK release (hrx-loom, ROCm/hrx-system) this library uses.
+// src/loom_package.hpp defines the compatible package SDK versions.
 // nix/loom-runtime.nix pins the same release (tests/build_test.sh checks).
 #define LOOM_TEXT_EMBED_HRX_LOOM "0.3.0"
 

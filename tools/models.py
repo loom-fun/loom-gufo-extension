@@ -4,8 +4,8 @@
 For each package it pins the revision built for the Loom SDK this extension
 runs (nix/loom-runtime.nix): the card's `v<sdk>` tag when it has one (loom-fun
 tags the last revision for an SDK once the default branch moves to a newer
-one), else the default branch; the revision's llm_config.json must say it is
-built for that SDK. Then it reads its
+one), else the default branch. Its llm_config.json must name an SDK the
+runtime supports. Then it reads its
 model.json: the package files become the component that fills --model (the
 model directory), and every origin the card's parameter files come from
 (checkpoint, drafter, vision) becomes a component with those files at their
@@ -16,7 +16,7 @@ directory to pin each file's size and SHA-256 in models.lock.json.
     python3 tools/models.py                     # needs network (Hugging Face)
     python3 /path/to/gufo/tools/models/lock.py .
     python3 tools/models.py --licenses          # refresh only the license fields
-    python3 tools/models.py --check             # every pinned package is built for the runtime's SDK
+    python3 tools/models.py --check             # every pinned package can be used by the runtime
     python3 tools/models.py --add               # declare only the repositories new in models.txt
 
 Set HF_TOKEN for higher rate limits; HF_ENDPOINT selects a mirror.
@@ -100,9 +100,10 @@ def sdk_revision(repo, sdk):
 
 def check_sdk(repo, revision, sdk):
     built = package_sdk(repo, revision)
-    if series(built) != series(sdk):
-        raise SystemExit(f"{repo}@{revision[:8]} is built for Loom SDK {built}, the runtime is {sdk}: "
-                         f"it has no v{sdk} tag and its default branch targets another SDK")
+    built_series, runtime_series = series(built), series(sdk)
+    # Keep this rule in step with src/loom_package.hpp.
+    if built_series != runtime_series and (built_series, runtime_series) != ("0.2", "0.3"):
+        raise SystemExit(f"{repo}@{revision[:8]} is built for Loom SDK {built}, the runtime is {sdk}")
 
 
 def license_text(licenses):
@@ -217,7 +218,7 @@ def check():
     for model in manifest["models"]:
         source = model["components"][0]["source"]
         check_sdk(source["hf"], source["revision"], sdk)
-    print(f"{len(manifest['models'])} packages built for Loom SDK {sdk}", file=sys.stderr)
+    print(f"{len(manifest['models'])} packages compatible with Loom SDK {sdk}", file=sys.stderr)
 
 
 def main():
