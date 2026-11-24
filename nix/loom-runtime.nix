@@ -81,6 +81,7 @@ clangStdenv.mkDerivation {
     "-DLIBHRX_BUILD=OFF"
     "-DIREE_HAL_DRIVER_AMD_XDNA=OFF"
     "-DLOOM_TARGET_ALL_AMD_GPU=ON"
+    "-DLOOM_IMPORT_CXX=ON"
     "-DIREE_CMAKE_TRY_FILE=${embed}/loom_text_embed.cmake"
   ];
 
