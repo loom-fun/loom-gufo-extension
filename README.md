@@ -178,7 +178,7 @@ unchanged. The extension runs the package's own kernels, chat template, tokenize
 library (`loom-embed/`) over Loom's text model layer. Details: `DESIGN.md`.
 
 Options: `--loom-device URI`, `--loom-memory-bytes N` (default: none, and Loom's memory pool is committed at load, as
-the loom-fun cards serve; N makes it an elastic pool with that budget, which prefills slower on 0.2.0 and can refuse
+the loom-fun cards serve; N makes it an elastic pool with that budget, which prefills slower on Strix Halo and can refuse
 long prompts when small), `--loom-preset NAME` (only for a package directory that holds several presets),
 `--loom-logits auto|on|off`. `--cache-disk DIR` keeps the prompt cache across restarts (its checkpoint images need the
 elastic pool, which the extension then uses).
@@ -186,10 +186,9 @@ elastic pool, which the extension then uses).
 ## Limits
 
 - In a container, run with `--security-opt seccomp=unconfined` (Loom's GPU memory reservation needs it).
-- Loom streams weights from disk through pinned buffers, which need a locked-memory limit (`ulimit -l`) of at least
-  64 MiB. Below that (stock Ubuntu: 8 MiB, also Docker's default) the extension reads the weights into host memory at
-  load instead, as `loom-serve --parameter_mode=preload` does, so loading takes about the weights' size in extra RAM.
-  Raise the limit (`ulimit -l unlimited`, `LimitMEMLOCK=infinity`, Docker `--ulimit memlock=-1`) to stream them.
+- Loom 0.3.0 reads weights through buffered file I/O by default, which works at a stock locked-memory limit
+  (`ulimit -l`: 8 MiB on stock Ubuntu, also Docker's default); the extension no longer falls back to reading whole
+  weight files into host memory at load.
 - gpt-oss, Glimmer and Inkling 2: automatic tool choice is not grammar-constrained (the package parses the calls); required and named are.
 
 ## Quality
@@ -215,6 +214,7 @@ Earlier evidence in `validation/results/`: images, the disk cache tier and the C
 
 | Version | Gufo | Notes |
 |---|---|---|
+| 0.4.0 | extension API >= 0.3.35 (gufo-org/gufo main from ec6d3d07) | Loom SDK 0.3.0 (hrx-system v0.3.0, with its C++ source importer); serves 0.3.0 packages and the published 0.2.0 ones (controller ABI 1) and controller ABI 2 packages (span scheduling, checkpoint page IDs); weights load at a stock memlock limit |
 | 0.3.7 | extension API >= 0.3.35 (gufo-org/gufo main from ec6d3d07) | 52 models: adds Inkling-2-Mini, with a tool grammar for its call syntax (`inkling2`; automatic tool use stays on the device) |
 | 0.3.6 | extension API >= 0.3.35 (gufo-org/gufo main from ec6d3d07) | 51 models: adds Qwen3.8-27B UD-Q4_K_XL, gemma-4 26B-A4B and 31B QAT, and Flint |
 | 0.3.5 | extension API >= 0.3.35 (gufo-org/gufo main from ec6d3d07) | Validation: all 47 models through `gufo model install` (`validation/results/models.md`) |

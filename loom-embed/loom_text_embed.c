@@ -156,7 +156,7 @@ static iree_status_t loom_text_embed_open_devices(
                             "expected one device and pool");
   }
   // As the loom-fun cards serve: the pool is fixed (backing committed at
-  // load, faster than elastic on 0.2.0) unless a budget or checkpoint images
+  // load, faster than elastic on Strix Halo) unless a budget or checkpoint images
   // need elastic backing.
   embed->devices.pools[0].options.elastic = elastic || options->memory_bytes;
   embed->devices.pools[0].options.memory_limit = options->memory_bytes;
@@ -1590,7 +1590,7 @@ LOOM_TEXT_EMBED_EXPORT int loom_text_embed_checkpoint_import(
   }
   const uint32_t needed = (uint32_t)iree_host_size_ceil_div(
       info->position, state->storage.block_size);
-  // Page IDs grow with demand (Loom 0.2.0): after a restart the pool is still
+  // Page IDs grow with demand: after a restart the pool is still
   // empty. Grow it as Loom does when it resumes a suspended row.
   loom_runtime_block_pool_t* pages = &state->cache.pool;
   if (needed > pages->available) {

@@ -1,10 +1,10 @@
 # Running the logits checks on a GPU runner (Strix Halo and Radeon AI PRO R9700)
 
 How the Gufo logits checks run on a CI runner that has a GPU but no Nix or Docker (AMD DevLab Dispatch). The embed library is
-built by this repository's `nix/runtime.nix` (Loom 0.2.0) and serves both GPUs.
+built by this repository's `nix/runtime.nix` (Loom 0.3.0) and serves both GPUs.
 
 ## What runs where
-- **No Nix or Docker on the runner.** Everything is built on a dev box and shipped as one tarball (the bundle): a gufo built with its HIP backend (a CPU-only gufo answers "HIP engine is disabled" at load: the serve stack is compiled only with it; the Nix closure comes from gufo.cachix.org, the build takes minutes) with the loom extension, `libloom_text_embed.so` (Loom's text model layer, built with hrx-system v0.2.0; one
+- **No Nix or Docker on the runner.** Everything is built on a dev box and shipped as one tarball (the bundle): a gufo built with its HIP backend (a CPU-only gufo answers "HIP engine is disabled" at load: the serve stack is compiled only with it; the Nix closure comes from gufo.cachix.org, the build takes minutes) with the loom extension, `libloom_text_embed.so` (Loom's text model layer, built with hrx-system v0.3.0; one
   library serves `gfx1151` and `gfx1201`), every shared library they need and the loader. `run.sh` starts a program through the bundled loader
   and libraries, so the runner contributes only the kernel (amdgpu driver, `/dev/kfd`, `/dev/dri/renderD*`) and Python 3.
   The model work is Loom's (device code inside the embed library); gufo's own HIP kernels are not used by the extension.

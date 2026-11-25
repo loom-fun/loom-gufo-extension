@@ -19,7 +19,9 @@ directory to pin each file's size and SHA-256 in models.lock.json.
     python3 tools/models.py --check             # every pinned package can be used by the runtime
     python3 tools/models.py --add               # declare only the repositories new in models.txt
 
-Set HF_TOKEN for higher rate limits; HF_ENDPOINT selects a mirror.
+Set HF_TOKEN for higher rate limits; HF_ENDPOINT selects a mirror. LOOM_ORG=loom-fun-staging declares every
+repository of models.txt from that org instead (a release candidate before an SDK promotion: validate it, never
+commit it).
 """
 
 import json
@@ -230,6 +232,9 @@ def main():
     # One repository per line, optionally followed by the Gufo model ID to give it.
     lines = [line.split() for line in (ROOT / "tools" / "models.txt").read_text().splitlines()
              if line.strip() and not line.startswith("#")]
+    org = os.environ.get("LOOM_ORG")
+    if org:
+        lines = [[f"{org}/{line[0].split('/', 1)[1]}", *line[1:]] for line in lines]
     repos = [line[0] for line in lines]
     names = {line[0]: line[1] for line in lines if len(line) > 1}
     path = ROOT / "extension.json"
