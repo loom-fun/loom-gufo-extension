@@ -214,7 +214,7 @@ Earlier evidence in `validation/results/`: images, the disk cache tier and the C
 
 | Version | Gufo | Notes |
 |---|---|---|
-| 0.4.0 | extension API >= 0.3.35 (gufo-org/gufo main from ec6d3d07) | Loom SDK 0.3.0 (hrx-system v0.3.0, with its C++ source importer); serves 0.3.0 packages and the published 0.2.0 ones (controller ABI 1) and controller ABI 2 packages (span scheduling, checkpoint page IDs); weights load at a stock memlock limit |
+| 0.4.0 | extension API >= 0.3.35 (gufo-org/gufo main from ec6d3d07) | Loom SDK 0.3.0 (hrx-system v0.3.0, with its C++ source importer); serves 0.3.0 packages and the published 0.2.0 ones (controller ABI 1); weights load at a stock memlock limit |
 | 0.3.7 | extension API >= 0.3.35 (gufo-org/gufo main from ec6d3d07) | 52 models: adds Inkling-2-Mini, with a tool grammar for its call syntax (`inkling2`; automatic tool use stays on the device) |
 | 0.3.6 | extension API >= 0.3.35 (gufo-org/gufo main from ec6d3d07) | 51 models: adds Qwen3.8-27B UD-Q4_K_XL, gemma-4 26B-A4B and 31B QAT, and Flint |
 | 0.3.5 | extension API >= 0.3.35 (gufo-org/gufo main from ec6d3d07) | Validation: all 47 models through `gufo model install` (`validation/results/models.md`) |
