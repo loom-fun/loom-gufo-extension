@@ -31,6 +31,7 @@ struct Epoch {
 
 struct State {
   Script script;
+  std::string prepared_request_body;
   std::vector<Epoch> epochs;
   bool declares_logits{true};
   // What the fake chat program renders for the placeholder tool call.

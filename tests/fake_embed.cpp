@@ -119,6 +119,7 @@ int loom_text_embed_chat_prepare(loom_text_embed_t*, const char* body, size_t n,
   if (out_request) {
     auto* r = new loom_text_embed_request_t;
     r->body.assign(body, n);
+    fake::state().prepared_request_body = r->body;
     r->logits = r->body.find("\"logits\":true") != std::string::npos ||
                 r->body.find("\"logits\": true") != std::string::npos;
     *out_request = r;

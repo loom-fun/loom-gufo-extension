@@ -437,7 +437,14 @@ public:
   // counts reasoning from a prompt-opened reasoning block.
   [[nodiscard]] ext::InitialOutputState InitialOutputState(
       const ext::ChatRequest& request) const override {
-    const auto prepared = PreparePrompt(request);
+    // Gufo queries its defaults at load time with an empty conversation.
+    // Loom's chat renderer requires a message even for this probe.
+    std::optional<ext::ChatRequest> placeholder;
+    if (request.messages.empty()) {
+      placeholder = request;
+      placeholder->messages.emplace_back(ext::ChatRole::kUser, ".");
+    }
+    const auto prepared = PreparePrompt(placeholder ? *placeholder : request);
     const auto* context =
         prepared ? dynamic_cast<const LoomPromptContext*>(prepared->context.get())
                  : nullptr;

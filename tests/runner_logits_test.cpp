@@ -155,6 +155,21 @@ double LogSoftmax(const float* row, int token) {
   return static_cast<double>(row[token]) - m - std::log(sum);
 }
 
+void TestInitialOutputStateProbe() {
+  Fixture f;
+  ext::ChatRequest request;
+  request.tools.push_back({.name = "weather", .parameters_json = R"({"type":"object"})"});
+  auto expected = request;
+  expected.messages.emplace_back(ext::ChatRole::kUser, ".");
+  (void)f.runner->InitialOutputState(request);
+  CHECK(fake::state().prepared_request_body == ChatBody(f.model->info().model_id, expected));
+  CHECK(request.messages.empty());
+
+  request.messages.emplace_back(ext::ChatRole::kUser, "hello");
+  (void)f.runner->InitialOutputState(request);
+  CHECK(fake::state().prepared_request_body == ChatBody(f.model->info().model_id, request));
+}
+
 void TestDevicePathUnchanged() {
   std::cerr << "device path: no host need keeps the device sampler\n";
   fake::reset();
@@ -806,6 +821,7 @@ void TestDialectParallelAndEdges() {
 }  // namespace
 
 int main() {
+  TestInitialOutputStateProbe();
   TestDevicePathUnchanged();
   TestLogprobs();
   TestRepetitionPenalty();
