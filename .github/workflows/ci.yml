@@ -1,0 +1,23 @@
+name: ci
+# No GPU: the runner's host-sampling and package tests against a fake libloom_text_embed (tests/build_test.sh, with
+# Gufo main's sources) and the model lock check (every pinned package revision is usable by the runtime's Loom SDK).
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Gufo main
+        run: git clone -q --depth 1 https://github.com/gufo-org/gufo "$RUNNER_TEMP/gufo" && git -C "$RUNNER_TEMP/gufo" log --oneline -1
+      - run: sudo apt-get update -q && sudo apt-get install -y -q libicu-dev libssl-dev pkg-config
+      - name: tests/build_test.sh
+        run: GUFO=$RUNNER_TEMP/gufo tests/build_test.sh "$RUNNER_TEMP/out"
+      - name: model lock check
+        run: python3 tools/models.py --check
