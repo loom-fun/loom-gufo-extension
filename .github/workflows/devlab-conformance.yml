@@ -1,0 +1,110 @@
+name: devlab-conformance
+# The extension on real GPUs (AMD DevLab Dispatch Strix Halo and Radeon AI PRO R9700), against published or staging
+# packages (validation/devlab/README.md):
+#   bundle      (GitHub-hosted)  validation/devlab/build_bundle.sh: Gufo at flake.lock's revision with this extension and
+#                                libloom_text_embed (nix/runtime.nix) -> the bundle artifact
+#   conformance (DevLab matrix)  per GPU x package: loom-fetch (the pinned hrx-loom wheel, digest checked) at the listed
+#                                revision, then embed_probe and run_conformance.sh (Gufo's API checks with --logits),
+#                                all at a stock 8 MiB locked-memory limit
+# Runs on pull requests labeled `devlab-conformance` (every push re-runs it) and on demand.
+on:
+  pull_request:
+    types: [labeled, synchronize]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: devlab-conformance-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  HRX_LOOM: "0.3.0"
+  HRX_LOOM_WHEEL_SHA256: 6252bb0df262351175bdb2c4aaca22ffa63d80d791659aa4d2fa5c92a0af426f
+
+jobs:
+  bundle:
+    if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'devlab-conformance')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    steps:
+      - name: Free disk for the Nix store
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /opt/hostedtoolcache/CodeQL /usr/local/share/boost
+          sudo docker image prune -af >/dev/null
+          df -h /
+      - uses: actions/checkout@v4
+      - name: Gufo at flake.lock's revision
+        run: |
+          rev=$(python3 -c "import json; print(json.load(open('flake.lock'))['nodes']['gufo']['locked']['rev'])")
+          git init -q "$RUNNER_TEMP/gufo" && git -C "$RUNNER_TEMP/gufo" fetch -q --depth 1 https://github.com/gufo-org/gufo "$rev"
+          git -C "$RUNNER_TEMP/gufo" -c advice.detachedHead=false checkout -q FETCH_HEAD
+      - name: build_bundle.sh
+        run: TMPDIR=$RUNNER_TEMP validation/devlab/build_bundle.sh "$RUNNER_TEMP/gufo" "$RUNNER_TEMP/bundle"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gufo-loom-bundle
+          path: ${{ runner.temp }}/bundle
+          retention-days: 7
+
+  conformance:
+    needs: bundle
+    strategy:
+      fail-fast: false
+      matrix:
+        gpu:
+          - {id: strix-halo, suffix: "", runs_on: [strix-halo, devlab-dispatch, Linux, self-hosted]}
+          - {id: radeon-r9700, suffix: "-r9700", runs_on: [self-hosted, devlab-dispatch, radeon-r9700]}
+        # A dense, a hybrid (gated delta net, MTP drafter) and a gemma4 (assistant drafter) package. Revisions: the
+        # ones under test (staging before an SDK promotion), recorded in the job summary.
+        package:
+          - {repo: loom-fun-staging/unsloth-Qwen3-0.6B-loom, revision: main}
+          - {repo: loom-fun-staging/unsloth-Qwen3.5-4B-loom, revision: main}
+          - {repo: loom-fun-staging/unsloth-gemma-4-E2B-it-loom, revision: main}
+    name: ${{ matrix.gpu.id }} ${{ matrix.package.repo }}
+    runs-on: ${{ matrix.gpu.runs_on }}
+    timeout-minutes: 120
+    env:
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: gufo-loom-bundle
+          path: bundle-dl
+      - name: Unpack the bundle, install the pinned loom-fetch
+        run: |
+          w=$RUNNER_TEMP/conf; rm -rf "$w"; mkdir -p "$w/bundle" "$w/out"; echo "W=$w" >> "$GITHUB_ENV"
+          (cd bundle-dl && sha256sum -c *.sha256)
+          tar xzf bundle-dl/*.tar.gz -C "$w/bundle" --strip-components=1
+          python3 -m venv "$w/venv" && "$w/venv/bin/pip" -q download --no-deps "hrx-loom==$HRX_LOOM" -d "$w/wheel"
+          echo "$HRX_LOOM_WHEEL_SHA256  $(ls "$w"/wheel/hrx_loom-*.whl)" | sha256sum -c -
+          "$w/venv/bin/pip" -q install "$(ls "$w"/wheel/hrx_loom-*.whl)[hf]"
+      - name: Fetch the package
+        run: |
+          repo=${{ matrix.package.repo }}; rev=${{ matrix.package.revision }}
+          [ "$rev" = main ] && rev=$(curl -fsS "https://huggingface.co/api/models/$repo/revision/main" | python3 -c 'import json,sys; print(json.load(sys.stdin)["sha"])')
+          preset=chat${{ matrix.gpu.suffix }}
+          curl -fsS "https://huggingface.co/$repo/resolve/$rev/model.json" | python3 -c "import json,sys; sys.exit(0 if '$preset' in json.load(sys.stdin).get('presets', {}) else 1)" || preset=chat
+          echo "PRESET=$preset" >> "$GITHUB_ENV"
+          echo "| ${{ matrix.gpu.id }} | $repo | $rev | $preset |" | tee -a "$W/out/package.md"
+          "$W/venv/bin/loom-fetch" "huggingface:$repo:$preset@$rev" --no-input --output="$W/pkg" > "$W/out/fetch.log" 2>&1 || { tail -30 "$W/out/fetch.log"; exit 1; }
+      - name: embed_probe and Gufo conformance at a stock memlock limit
+        run: |
+          ulimit -l 8192; echo "memlock: $(ulimit -l) KiB" | tee "$W/out/memlock.txt"
+          "$W/bundle/run-embed-probe.sh" "$W/pkg" 24 3 "$PRESET" | tee "$W/out/embed_probe.json"
+          BUNDLE=$W/bundle bash validation/devlab/run_conformance.sh "$W/pkg" "$W/out/gufo"
+      - if: always()
+        name: Summary
+        run: |
+          { echo "| GPU | package | revision | preset |"; echo "|---|---|---|---|"; cat "$W/out/package.md" 2>/dev/null
+            echo; tail -2 "$W/out/embed_probe.json" 2>/dev/null; tail -3 "$W/out/gufo/conformance.log" 2>/dev/null; } >> "$GITHUB_STEP_SUMMARY"
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: conformance-${{ matrix.gpu.id }}-${{ strategy.job-index }}
+          path: ${{ env.W }}/out
+      - if: always()
+        name: Clean up
+        run: rm -rf "$W"
